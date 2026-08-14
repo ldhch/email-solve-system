@@ -1,0 +1,19 @@
+"""ORM models. Importing this package registers all models on Base.metadata."""
+
+from app.models.attachment import Attachment
+from app.models.audit import AuditLog
+from app.models.conversation import Conversation
+from app.models.customer import Customer
+from app.models.email import Email
+from app.models.reply import Reply
+from app.models.system_state import SystemState
+
+__all__ = [
+    "Attachment",
+    "AuditLog",
+    "Conversation",
+    "Customer",
+    "Email",
+    "Reply",
+    "SystemState",
+]

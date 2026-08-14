@@ -1,0 +1,80 @@
+"""SMTP mailer tests (M-11)."""
+
+from __future__ import annotations
+
+import pytest
+
+from app.config import Settings
+from app.core.exceptions import SMTPError, SMTPRateLimitError
+from app.models.reply import Reply
+from app.services.mailer import MailerService, build_message
+
+from conftest import FakeSMTP
+
+
+def _reply() -> Reply:
+    return Reply(
+        conversation_id=1,
+        email_id=1,
+        message_id="<out-1@example.com>",
+        in_reply_to="in-1@example.com",
+        content_en="Thank you!",
+        status="draft",
+        reply_type="general",
+    )
+
+
+def test_build_message_headers() -> None:
+    settings = Settings(
+        email_username="bot@example.com",
+        mail_from_name="Support",
+        smtp_port=465,
+        llm_provider="mock",
+    )
+    msg = build_message(_reply(), "customer@example.com", "Question", settings)
+    assert msg["From"] == "Support <bot@example.com>"
+    assert msg["To"] == "customer@example.com"
+    assert msg["Subject"] == "Re: Question"
+    assert msg["Message-ID"] == "<out-1@example.com>"
+    assert msg["In-Reply-To"] == "in-1@example.com"
+
+
+def test_build_message_keeps_existing_re_prefix() -> None:
+    settings = Settings(email_username="bot@example.com", llm_provider="mock")
+    msg = build_message(_reply(), "c@example.com", "Re: Question", settings)
+    assert msg["Subject"] == "Re: Question"
+
+
+def test_send_success(db, settings, fake_smtp_class) -> None:
+    service = MailerService(db, settings, smtp_class=FakeSMTP)
+    service.send(_reply(), "customer@example.com", "Question")
+    assert len(FakeSMTP.instances) == 1
+    assert FakeSMTP.instances[0].sent[0]["To"] == "customer@example.com"
+
+
+def test_send_retries_then_succeeds(db, settings, fake_smtp_class) -> None:
+    FakeSMTP.reset(fail_remaining=2)
+    service = MailerService(db, settings, smtp_class=FakeSMTP)
+    service.send(_reply(), "customer@example.com", "Question")
+    assert len(FakeSMTP.instances) == 3
+    assert FakeSMTP.instances[-1].sent
+
+
+def test_send_raises_after_three_failures(db, settings, fake_smtp_class) -> None:
+    FakeSMTP.reset(fail_remaining=99)
+    service = MailerService(db, settings, smtp_class=FakeSMTP)
+    with pytest.raises(SMTPError):
+        service.send(_reply(), "customer@example.com", "Question")
+    assert len(FakeSMTP.instances) == 3
+
+
+def test_rate_limit(db, fake_smtp_class) -> None:
+    settings = Settings(
+        email_username="bot@example.com",
+        llm_provider="mock",
+        smtp_rate_limit_per_hour=1,
+    )
+    service = MailerService(db, settings, smtp_class=FakeSMTP)
+    service.send(_reply(), "c1@example.com", "Q1")
+    with pytest.raises(SMTPRateLimitError):
+        service.send(_reply(), "c2@example.com", "Q2")

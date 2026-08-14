@@ -1,0 +1,27 @@
+# Env / secrets
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Node / frontend (added from Phase 2)
+node_modules/
+frontend/dist/
+
+# Local data (SQLite DB, attachments, exports, secrets)
+data/*
+!data/.gitkeep
+!data/attachments/
+!data/attachments/.gitkeep
+!data/exports/
+!data/exports/.gitkeep
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
