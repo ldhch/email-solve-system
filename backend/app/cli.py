@@ -18,7 +18,6 @@ import sys
 import time
 
 from app.config import get_settings
-from app.core.exceptions import ConfigurationError, IMAPError
 from app.core.logging import get_logger
 from app.db.session import get_session_factory, init_db
 from app.llm.client import MockLLMClient
@@ -40,7 +39,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
     init_db(settings)
     factory = get_session_factory(settings)
     with factory() as db:
-        service = IngestService(db, settings)
+        service = IngestService(db, settings, session_factory=factory)
         summary = service.fetch_and_process()
         logger.info("Poll summary: %s", summary)
     return 0
@@ -55,11 +54,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         try:
             factory = get_session_factory(settings)
             with factory() as db:
-                service = IngestService(db, settings)
+                service = IngestService(db, settings, session_factory=factory)
                 summary = service.fetch_and_process()
                 logger.info("Poll summary: %s", summary)
-        except (IMAPError, ConfigurationError) as exc:
-            logger.error("Poll cycle failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - keep the daemon loop alive
+            logger.exception("Poll cycle failed: %s", exc)
         time.sleep(interval)
 
 
@@ -106,6 +105,8 @@ def cmd_resume(_args: argparse.Namespace) -> int:
     with factory() as db:
         state = _state(db)
         state.ai_paused = False
+        state.paused_at = None
+        state.paused_reason = None
         state.resumed_at = utcnow()
         log_action(db, "resume", "system", state.id, ip="cli")
         db.commit()
@@ -127,7 +128,7 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         from app.services.mailer import MailerService
 
         llm = MockLLMClient(settings)
-        service = IngestService(db, settings, llm_client=llm)
+        service = IngestService(db, settings, llm_client=llm, session_factory=factory)
         if args.dry_run:
             service.mailer = _DryRunMailer()
 

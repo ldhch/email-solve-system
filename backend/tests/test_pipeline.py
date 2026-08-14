@@ -128,6 +128,34 @@ def test_send_failure_marks_reply_failed_and_keeps_email_unseen(
     assert imap.seen == []  # retry on the next poll cycle
 
 
+def test_failed_reply_is_resent_without_regeneration(
+    db, settings, fake_imap
+) -> None:
+    FakeSMTP.reset(fail_remaining=99)
+    raw = make_raw_email(message_id="<resend-1@example.com>")
+    imap = fake_imap([("4", raw)])
+    service = _service(db, settings, imap, FakeSMTP)
+
+    first = service.fetch_and_process()
+    assert first["failed"] == 1
+    replies = db.execute(select(Reply)).scalars().all()
+    assert len(replies) == 1
+    assert replies[0].status == "failed"
+    original_content = replies[0].content_en
+
+    FakeSMTP.reset(fail_remaining=0)
+    second = service.fetch_and_process()
+    assert second["auto_sent"] == 1
+    assert second["fetched"] == 1
+
+    db.expire_all()
+    replies = db.execute(select(Reply)).scalars().all()
+    assert len(replies) == 1  # reused draft, no LLM regeneration / new row
+    assert replies[0].status == "sent"
+    assert replies[0].content_en == original_content
+    assert imap.seen == ["4"]
+
+
 def test_duplicate_uid_second_cycle_skipped(db, settings, fake_smtp_class, fake_imap) -> None:
     raw = make_raw_email(message_id="<dup-1@example.com>")
     imap = fake_imap([("2", raw)])

@@ -51,7 +51,12 @@ class ReplierService:
         self.llm_client = llm_client
 
     def _conversation_history(self, conversation: Conversation, current: Email) -> list[dict[str, str]]:
-        """Last 6 inbound emails + sent replies of the conversation, oldest first."""
+        """Build the prompt context: recent history plus the current email.
+
+        The current email is always appended as the final `[customer]` turn,
+        otherwise the model would only see older turns and answer blindly
+        (PRD F2 requires aggregating every open question in the conversation).
+        """
 
         emails = self.db.execute(
             select(Email)
@@ -74,7 +79,10 @@ class ReplierService:
         lines = []
         for _, speaker, content in timeline[-6:]:
             lines.append(f"[{speaker}] {content}\n")
-        return [{"role": "user", "content": "\n".join(lines)}]
+        history = "\n".join(lines)
+        current_text = f"[customer] {current.body_text or ''}\n"
+        content = f"{history}\n{current_text}" if history else current_text
+        return [{"role": "user", "content": content}]
 
     def generate(self, email_row: Email, conversation: Conversation) -> str:
         messages = self._conversation_history(conversation, email_row)

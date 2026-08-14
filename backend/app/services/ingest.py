@@ -25,13 +25,14 @@ from typing import Any
 
 import bleach
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
-from app.core.exceptions import IMAPError
+from app.core.exceptions import IMAPError, SMTPError
 from app.llm.client import BaseLLMClient, build_llm_client
 from app.models.attachment import Attachment
 from app.models.email import Email
+from app.models.reply import Reply
 from app.models.system_state import SystemState
 from app.services.audit import log_action, utcnow
 from app.services.classifier import Classification, ClassifierService, resolve_action
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 2 * 1024 * 1024  # truncate body beyond 2 MB (TECH N-2)
 WARN_RAW_BYTES = 5 * 1024 * 1024  # log warning beyond 5 MB raw email
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # drop oversized email attachments (disk-fill guard)
 _MSGID_TAG_RE = re.compile(r"^<|>$")
 
 
@@ -120,11 +122,17 @@ def _truncate(text: str | None, limit: int = MAX_BODY_BYTES) -> str | None:
     return encoded[:limit].decode("utf-8", errors="ignore")
 
 
-def synthetic_message_id(subject: str, from_email: str, received_at: datetime) -> str:
-    """Stable synthetic Message-ID when the incoming mail lacks one."""
+def synthetic_message_id(
+    subject: str, from_email: str, received_at: datetime, uid: str | None = None
+) -> str:
+    """Stable synthetic Message-ID when the incoming mail lacks one.
+
+    `uid` is included so two messages from the same sender/subject/second do
+    not collapse into one ID when the real Message-ID header is missing.
+    """
 
     digest = hashlib.sha1(
-        f"{subject}|{from_email}|{received_at.isoformat()}".encode("utf-8")
+        f"{subject}|{from_email}|{received_at.isoformat()}|{uid or ''}".encode("utf-8")
     ).hexdigest()[:24]
     return f"gen-{digest}@local"
 
@@ -138,6 +146,7 @@ def parse_email(raw: bytes, uid: str | None = None) -> ParsedEmail:
         _decode_mime_header(msg.get("Subject")),
         getaddresses([msg.get("From", "")])[0][1] if msg.get("From") else "unknown",
         parsedate_to_datetime(msg.get("Date")) or datetime.now(),
+        uid=uid,
     )
 
     references: list[str] = []
@@ -198,7 +207,6 @@ def parse_email(raw: bytes, uid: str | None = None) -> ParsedEmail:
         received_at = datetime.now()
     if received_at.tzinfo is not None:
         received_at = received_at.astimezone().replace(tzinfo=None)
-    received_at = received_at.replace(tzinfo=None)
 
     if len(raw) > WARN_RAW_BYTES:
         logger.warning("Oversized raw email (%s bytes) for %s", len(raw), message_id)
@@ -231,12 +239,14 @@ class IngestService:
         llm_client: BaseLLMClient | None = None,
         mailer: MailerService | None = None,
         imap: Any | None = None,
+        session_factory: sessionmaker | None = None,
     ) -> None:
         self.db = db
         self.settings = settings
         self.llm_client = llm_client or build_llm_client(settings)
         self.mailer = mailer or MailerService(db, settings)
         self.imap = imap
+        self.session_factory = session_factory
         self.conversations = ConversationService(db, settings)
         self.classifier = ClassifierService(settings, self.llm_client)
         self.replier = ReplierService(db, settings, self.llm_client)
@@ -299,7 +309,13 @@ class IngestService:
         except Exception as exc:  # noqa: BLE001 - pipeline must survive single failures
             logger.exception("Pipeline failed for message_id=%s", parsed.message_id)
             self.db.rollback()
-            log_action(self.db, "pipeline_failed", "email", 0, ip=None)
+            # Write the failure audit in a fresh session so a rolled-back
+            # business transaction can never pollute or swallow the record.
+            if self.session_factory is not None:
+                with self.session_factory() as audit_db:
+                    log_action(audit_db, "pipeline_failed", "email", 0, ip=None)
+            else:
+                log_action(self.db, "pipeline_failed", "email", 0, ip=None)
             return ProcessingResult(
                 message_id=parsed.message_id,
                 action="failed",
@@ -311,6 +327,9 @@ class IngestService:
             select(Email).where(Email.message_id == parsed.message_id)
         ).scalar_one_or_none()
         if existing is not None:
+            resend_result = self._resend_failed_reply(existing)
+            if resend_result is not None:
+                return resend_result
             logger.info("Duplicate message_id=%s skipped", parsed.message_id)
             return ProcessingResult(message_id=parsed.message_id, action="duplicate")
 
@@ -406,24 +425,80 @@ class IngestService:
             category=classification.category,
         )
 
+    def _resend_failed_reply(self, email_row: Email) -> ProcessingResult | None:
+        """Retry the latest failed reply for an already-ingested email.
+
+        Keeps the original draft (no LLM regeneration) and only re-runs SMTP,
+        which matches PRD F10 "SMTP 失败重试 3 次，失败后进入待发送" at the
+        Phase-1 level: the email stays UNSEEN until a send finally succeeds.
+        """
+
+        reply = self.db.execute(
+            select(Reply)
+            .where(Reply.email_id == email_row.id, Reply.status == "failed")
+            .order_by(Reply.created_at.desc())
+        ).scalars().first()
+        if reply is None:
+            return None
+
+        try:
+            self.mailer.send(reply, to_email=email_row.from_email, subject=email_row.subject)
+        except SMTPError as exc:
+            reply.send_error = str(exc)
+            log_action(self.db, "reply_failed", "reply", reply.id)
+            self.db.commit()
+            return ProcessingResult(
+                message_id=email_row.message_id,
+                action="failed",
+                email_id=email_row.id,
+                conversation_id=email_row.conversation_id,
+                reply_id=reply.id,
+                error=str(exc),
+            )
+
+        reply.status = "sent"
+        reply.sent_at = utcnow()
+        reply.send_error = None
+        log_action(self.db, "reply_sent", "reply", reply.id)
+        self.db.commit()
+        return ProcessingResult(
+            message_id=email_row.message_id,
+            action="auto_sent",
+            email_id=email_row.id,
+            conversation_id=email_row.conversation_id,
+            reply_id=reply.id,
+        )
+
     def _persist_attachments(
         self, email_row: Email, attachments: list[ParsedAttachment]
     ) -> None:
         """Write attachment files under `data/attachments` and record rows."""
 
         for att in attachments:
+            if len(att.payload) > MAX_ATTACHMENT_BYTES:
+                logger.warning(
+                    "Dropping oversized attachment %r (%s bytes) for email id=%s",
+                    att.filename,
+                    len(att.payload),
+                    email_row.id,
+                )
+                continue
             safe_name = os.path.basename(att.filename).replace("/", "_").replace("\\", "_")
             if not safe_name:
                 safe_name = "attachment.bin"
             target = Path(self.settings.attachment_dir) / f"{uuid.uuid4().hex[:12]}_{safe_name}"
             target.write_bytes(att.payload)
+            # Store a path relative to the data directory so the DB survives
+            # machine moves / redeploys (absolute paths would all 404 later).
+            data_dir = Path(self.settings.attachment_dir).parent
+            stored_path = str(target.relative_to(data_dir))
             self.db.add(
                 Attachment(
                     email_id=email_row.id,
                     filename=att.filename,
                     content_type=att.content_type,
                     size_bytes=len(att.payload),
-                    stored_path=str(target),
+                    stored_path=stored_path,
                     created_at=utcnow(),
                 )
             )
@@ -432,23 +507,36 @@ class IngestService:
         """Fetch all UNSEEN emails and process each one synchronously."""
 
         conn = self.imap or self._connect()
-        items = self.fetch_unseen(conn)
-        summary = {
-            "fetched": len(items),
-            "auto_sent": 0,
-            "manual": 0,
-            "paused": 0,
-            "duplicate": 0,
-            "silenced": 0,
-            "failed": 0,
-        }
-        for uid, raw in items:
-            parsed = parse_email(raw, uid=uid)
-            result = self.process_one(parsed)
-            if result.action in summary:
-                summary[result.action] += 1
-            # Persisted emails are marked SEEN so they are not re-fetched.
-            # Paused/failed emails stay UNSEEN and are processed after resume/retry.
-            if result.action in ("auto_sent", "manual", "silenced"):
-                self.mark_seen(conn, uid)
-        return summary
+        owns_connection = self.imap is None
+        try:
+            items = self.fetch_unseen(conn)
+            summary = {
+                "fetched": len(items),
+                "auto_sent": 0,
+                "manual": 0,
+                "paused": 0,
+                "duplicate": 0,
+                "silenced": 0,
+                "failed": 0,
+            }
+            for uid, raw in items:
+                parsed = parse_email(raw, uid=uid)
+                result = self.process_one(parsed)
+                if result.action in summary:
+                    summary[result.action] += 1
+                # Persisted emails are marked SEEN so they are not re-fetched.
+                # Paused/failed emails stay UNSEEN and are processed after resume/retry.
+                if result.action in ("auto_sent", "manual", "silenced"):
+                    self.mark_seen(conn, uid)
+            return summary
+        finally:
+            # Release the IMAP session we created; otherwise a long-running loop
+            # leaks half-open connections and can be treated as abuse by the host.
+            if owns_connection:
+                try:
+                    conn.logout()
+                except Exception:  # noqa: BLE001 - best effort
+                    try:
+                        conn.close()
+                    except Exception:  # noqa: BLE001 - already gone
+                        pass

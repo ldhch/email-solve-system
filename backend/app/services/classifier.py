@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -126,7 +127,12 @@ class ClassifierService:
 
     def _keyword_hit(self, text: str) -> bool:
         lowered = text.lower()
-        return any(kw in lowered for kw in self.chargeback_keywords)
+        # Word-boundary match: avoid short tokens like "ftc"/"bbb" matching
+        # "facts"/"attic"/"abbey" and causing false chargeback escalations.
+        return any(
+            re.search(rf"\b{re.escape(kw)}\b", lowered)
+            for kw in self.chargeback_keywords
+        )
 
     @staticmethod
     def _parse_json(text: str) -> dict:

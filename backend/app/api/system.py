@@ -111,6 +111,8 @@ async def system_resume(
     if state is None:
         raise HTTPException(status_code=500, detail="INTERNAL")
     state.ai_paused = False
+    state.paused_at = None
+    state.paused_reason = None
     state.resumed_at = utcnow()
     log_action(
         db,

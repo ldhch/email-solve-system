@@ -98,6 +98,11 @@ def test_pause_and_resume_flow(settings, session_factory) -> None:
     assert resume.json()["ai_paused"] is False
     assert resume.json()["paused_at"] is None
 
+    after = _request(client, "GET", "/api/v1/system/status").json()
+    assert after["ai_paused"] is False
+    assert after["paused_at"] is None
+    assert after["paused_reason"] is None
+
 
 def test_pause_writes_audit_logs(settings, session_factory) -> None:
     client = _make_client(settings, session_factory)

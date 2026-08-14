@@ -44,6 +44,18 @@ def test_chargeback_keyword_forced_high() -> None:
     assert result.chargeback_risk is True
 
 
+def test_keyword_boundary_avoids_false_positive() -> None:
+    settings = Settings(low_confidence_threshold=0.6)
+    llm = StubLLM(
+        '{"risk_level":"low","confidence":0.95,"category":"product_spec",'
+        '"chargeback_risk":false,"summary_cn":"普通咨询"}'
+    )
+    service = ClassifierService(settings, llm)
+    # "softcover" contains the letters f-t-c, but must NOT trigger "ftc".
+    assert service._keyword_hit("I bought a softcover book") is False
+    assert service.classify(_parsed("I bought a softcover book")).chargeback_risk is False
+
+
 def test_llm_chargeback_flag_forced_high() -> None:
     settings = Settings(low_confidence_threshold=0.6)
     llm = StubLLM(

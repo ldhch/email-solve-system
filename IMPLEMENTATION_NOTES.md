@@ -34,10 +34,28 @@
 5. **退款/退货/换货请求在 Phase 1 一律不自动回复**（挽留策略属 Phase 2），分类为 `refund_request` 即转人工。
 6. **调度**：Phase 1 用 `cli run` 简单轮询循环；APScheduler（M-12）留到 Phase 4。
 7. **`users` 表与 `audit_logs.actor_id` 外键**：Phase 1 未建 users 表，`actor_id` 为无外键的可空整数（NULL=AI 管道）；Phase 2 建表后补外键。
-8. **SMTP 限流默认关闭**（`SMTP_RATE_LIMIT_PER_HOUR=0`）；R5 建议生产设 6。当前超限时回复标记 failed 并留待人工/下轮处理，未做自动重排期。
+8. **SMTP 限流默认关闭**（`SMTP_RATE_LIMIT_PER_HOUR=0`）；R5 建议生产设 6。发送失败的回复会保留 failed 草稿，并在下一轮拉取时复用原草稿重发（不再重新走 LLM）；限流触发时同样按 failed 处理，待下轮重发。
 9. **暂停期间**：邮件只拉取不处理、保持 IMAP 未读，恢复后由轮询自动补处理（符合 PRD F9 / TECH 5.6 积压处理语义）。
 10. **审计为最小版**：未做后台查询页、CSV 导出、防篡改（均属 Phase 4）。
 11. **healthz 不含 scheduler 心跳**：Phase 1 无 scheduler，返回 `db/uptime_sec`；Phase 4 按 N-4 补齐。
+
+## 🔧 Claude 审查后修复记录（2026-08-14）
+
+按外部审查结论修复以下问题：
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 14 | Replier 未把当前来信注入 prompt，导致低风险回复“盲答历史” | `_conversation_history` 现在显式追加当前邮件作为最后一条 `[customer]` 消息，并新增回归测试 |
+| 3 | 拒付关键词 `ftc`/`bbb` 等短词误命中普通正文 | `_keyword_hit` 改为 `\b` 词边界正则匹配，并新增 `softcover` 不误命中 `ftc` 的测试 |
+| 6 | SMTP 失败邮件下一轮被当重复跳过，从未重发 | 新增 `_resend_failed_reply`：重复拉取时复用上一条 failed 草稿直接重发，不重新分类/生成，并新增测试 |
+| 1 | `fetch_and_process` 每次循环泄漏 IMAP 半开连接 | 自有连接在 `finally` 中 `logout/close` |
+| 2 | `pipeline_failed` 审计写在已回滚 session 上 | 支持注入 `session_factory`，失败审计改用独立短 session；CLI 已传入 |
+| 7 | `cli run` 仅兜住 IMAP/配置异常，单封坏邮件可杀进程 | 改为 `except Exception` 记录后继续轮询 |
+| 10 | 附件 `stored_path` 存绝对路径，换机后失效 | 改为相对 data 目录的路径（如 `attachments/<uuid>_name`） |
+| 17 | resume 后 `paused_at/paused_reason` 残留 | API 与 CLI 恢复时清空这两项，保留 `resumed_at`，并更新测试 |
+| 11 | 合成 Message-ID 未区分同秒双发 | 合成哈希加入 `uid` |
+| 21 | 附件无大小上限，超大附件可写满磁盘 | 新增 `MAX_ATTACHMENT_BYTES=20MB`，超限丢弃并告警日志 |
+| 22 | 时区归一化重复赋值 | 删除冗余行 |
 
 ## ❓ 待老板确认的问题（一次性集中列出）
 
@@ -45,7 +63,7 @@
 2. **Titan 邮箱参数**：请在 Titan 后台确认 IMAP 地址/端口、SMTP 地址/端口，以及是否支持应用专用密码；本阶段按 `imap.titan.email:993` / `smtp.titan.email:465` 预设。
 3. **Phase 1 非低风险邮件暂不自动回复**：高风险（含拒付）与中风险邮件本阶段只入库+审计、不发信，等 Phase 2/3 补审核与安抚工单——是否接受此过渡行为？
 4. **暂停接口的令牌**：Phase 1 用 `AGENT_SERVICE_TOKEN` 保护暂停/恢复接口（老板先通过 CLI 或 curl 使用）；Phase 2 换成登录后自动失效——是否接受？
-5. **SMTP 发送频率**：生产是否按 R5 建议开启每小时 6 封限流？
+5. **SMTP 发送频率**：**上线前必须将 `SMTP_RATE_LIMIT_PER_HOUR` 设为 6**（当前默认 0=不限流，仅用于本地调试）。
 6. **回复质量确认**：Phase 1 回复只注入会话历史，无知识库/QA（Phase 3 才有）；低风险咨询类回复是否满足预期？
 
 ## 测试运行输出（本阶段交付证据）
