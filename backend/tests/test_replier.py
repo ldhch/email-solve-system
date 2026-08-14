@@ -53,3 +53,4 @@ def test_current_email_is_injected_into_prompt(db, settings) -> None:
     assert llm.messages, "expected at least one user message"
     combined = llm.messages[-1]["content"]
     assert "What is the exact shipping time to Germany?" in combined
+    assert combined.count("What is the exact shipping time to Germany?") == 1

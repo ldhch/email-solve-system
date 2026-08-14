@@ -60,7 +60,11 @@ class ReplierService:
 
         emails = self.db.execute(
             select(Email)
-            .where(Email.conversation_id == conversation.id, Email.is_inbound.is_(True))
+            .where(
+                Email.conversation_id == conversation.id,
+                Email.is_inbound.is_(True),
+                Email.id != current.id,
+            )
             .order_by(Email.received_at.asc())
         ).scalars().all()
         replies = self.db.execute(

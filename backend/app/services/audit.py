@@ -22,6 +22,7 @@ def log_action(
     resource_id: int = 0,
     actor_id: int | None = None,
     ip: str | None = None,
+    commit: bool = True,
 ) -> AuditLog:
     """Persist one audit record. `actor_id=None` means the AI pipeline."""
 
@@ -34,5 +35,7 @@ def log_action(
         at=utcnow(),
     )
     db.add(entry)
-    db.commit()
+    db.flush()
+    if commit:
+        db.commit()
     return entry

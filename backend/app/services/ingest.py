@@ -372,6 +372,7 @@ class IngestService:
             "email",
             email_row.id,
             actor_id=None,
+            commit=False,
         )
 
         customer = merged.customer

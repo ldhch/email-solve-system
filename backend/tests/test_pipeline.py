@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
+from app.core.exceptions import LLMError
 from app.llm.client import MockLLMClient
 from app.models.audit import AuditLog
 from app.models.conversation import Conversation
@@ -14,6 +15,15 @@ from app.services.ingest import IngestService
 from app.services.mailer import MailerService
 
 from conftest import FakeIMAP, FakeSMTP, make_raw_email
+
+
+class FailingGenerationLLM(MockLLMClient):
+    """Classification succeeds, reply generation fails (regression fixture)."""
+
+    def chat(self, messages, system_prompt=None, max_tokens=None, temperature=None) -> str:
+        if "classify" in (system_prompt or "").lower():
+            return super().chat(messages, system_prompt, max_tokens, temperature)
+        raise LLMError("simulated generation failure")
 
 
 def _service(db, settings, imap, smtp_class=None) -> IngestService:
@@ -93,6 +103,45 @@ def test_refund_request_not_auto_replied_in_phase1(
     email = db.execute(select(Email)).scalar_one()
     assert email.category == "refund_request"
     assert db.execute(select(Reply)).scalars().all() == []
+
+
+def test_generation_failure_rolls_back_and_can_retry(
+    db, settings, fake_imap
+) -> None:
+    settings = settings.model_copy(update={"llm_retries": 0})
+    raw = make_raw_email(
+        subject="Product size question",
+        body="Hi, what is the length of the XL t-shirt in centimeters?",
+        message_id="<genfail-1@example.com>",
+    )
+    imap = fake_imap([("6", raw)])
+    failing_service = IngestService(
+        db,
+        settings,
+        llm_client=FailingGenerationLLM(settings),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+
+    first = failing_service.fetch_and_process()
+    assert first["failed"] == 1
+    assert db.execute(select(Email)).scalars().all() == []
+    assert imap.seen == []
+
+    working_service = IngestService(
+        db,
+        settings,
+        llm_client=MockLLMClient(settings),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    second = working_service.fetch_and_process()
+    assert second["auto_sent"] == 1
+    email = db.execute(select(Email)).scalar_one()
+    assert email.message_id == "genfail-1@example.com"
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.status == "sent"
+    assert imap.seen == ["6"]
 
 
 def test_paused_system_fetches_but_does_not_process(
