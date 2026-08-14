@@ -7,6 +7,7 @@ import pytest
 from app.config import Settings
 from app.core.exceptions import SMTPError, SMTPRateLimitError
 from app.models.reply import Reply
+from app.services.audit import utcnow
 from app.services.mailer import MailerService, build_message
 
 from conftest import FakeSMTP
@@ -21,6 +22,7 @@ def _reply() -> Reply:
         content_en="Thank you!",
         status="draft",
         reply_type="general",
+        created_at=utcnow(),
     )
 
 
@@ -74,7 +76,33 @@ def test_rate_limit(db, fake_smtp_class) -> None:
         llm_provider="mock",
         smtp_rate_limit_per_hour=1,
     )
+    sent = _reply()
+    sent.status = "sent"
+    sent.sent_at = utcnow()
+    db.add(sent)
+    db.commit()
+
     service = MailerService(db, settings, smtp_class=FakeSMTP)
-    service.send(_reply(), "c1@example.com", "Q1")
     with pytest.raises(SMTPRateLimitError):
-        service.send(_reply(), "c2@example.com", "Q2")
+        service.send(_reply(), "c1@example.com", "Q1")
+
+
+def test_rate_limit_survives_mailer_recreation(db, fake_smtp_class) -> None:
+    settings = Settings(
+        email_username="bot@example.com",
+        llm_provider="mock",
+        smtp_rate_limit_per_hour=1,
+    )
+    sent = _reply()
+    sent.status = "sent"
+    sent.sent_at = utcnow()
+    db.add(sent)
+    db.commit()
+
+    first_service = MailerService(db, settings, smtp_class=FakeSMTP)
+    with pytest.raises(SMTPRateLimitError):
+        first_service.send(_reply(), "c1@example.com", "Q1")
+
+    second_service = MailerService(db, settings, smtp_class=FakeSMTP)
+    with pytest.raises(SMTPRateLimitError):
+        second_service.send(_reply(), "c2@example.com", "Q2")

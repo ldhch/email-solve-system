@@ -5,14 +5,15 @@ from __future__ import annotations
 import logging
 import smtplib
 import time
-from collections import deque
 from datetime import timedelta
 from email.message import EmailMessage
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.core.exceptions import SMTPError, SMTPRateLimitError
+from app.models.reply import Reply
 from app.services.audit import utcnow
 
 logger = logging.getLogger(__name__)
@@ -56,16 +57,22 @@ class MailerService:
         self.db = db
         self.settings = settings
         self.smtp_class = smtp_class or smtplib.SMTP_SSL
-        self._recent_sends: deque = deque()  # in-memory rate-limit window
 
     def _check_rate_limit(self) -> None:
         limit = self.settings.smtp_rate_limit_per_hour
         if limit <= 0:
             return
-        now = utcnow()
-        while self._recent_sends and self._recent_sends[0] < now - timedelta(hours=1):
-            self._recent_sends.popleft()
-        if len(self._recent_sends) >= limit:
+        cutoff = utcnow() - timedelta(hours=1)
+        sent_count = self.db.execute(
+            select(func.count())
+            .select_from(Reply)
+            .where(
+                Reply.status == "sent",
+                Reply.sent_at.is_not(None),
+                Reply.sent_at >= cutoff,
+            )
+        ).scalar_one()
+        if sent_count >= limit:
             raise SMTPRateLimitError(
                 "SMTP rate limit reached; reply kept as failed for manual retry"
             )
@@ -94,7 +101,6 @@ class MailerService:
         for attempt in range(1, 4):
             try:
                 self._send_once(msg)
-                self._recent_sends.append(utcnow())
                 return
             except Exception as exc:  # noqa: BLE001 - smtplib raises many types
                 last_error = exc
