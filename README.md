@@ -1,107 +1,121 @@
-# shouhou-agent — 售后邮件自动回复系统（Phase 1）
+# shouhou-agent — 售后邮件自动回复系统（Phase 2）
 
-> 当前进度：**Phase 1（里程碑 A）已完成**，未实现 Phase 2 及以后内容。
-> 目标链路：`IMAP 拉邮件 → 会话合并 → LLM 分类 → 低风险直接自动回复`，并带紧急暂停开关（F9）与审计日志（F10 最小版）。
+> 当前进度：**Phase 2（里程碑 B）已完成**，未实现 Phase 3 及以后内容。
+> 目标链路：`IMAP 拉邮件 → 会话合并 → LLM 分类 → 低风险自动回复 / 中风险进待审核 / 退换货挽留`，
+> 老板通过中文后台登录审核。
 
-## 1. 技术栈（本阶段用到的部分）
+## 1. 技术栈
 
 | 组件 | 选型 |
 |---|---|
-| 后端 | Python 3.11+ / FastAPI / SQLAlchemy 2 |
-| 数据库 | SQLite（WAL），`create_all` + seed，无迁移框架 |
-| LLM | DeepSeek（`deepseek-v4-flash`），封装在 `llm/client.py`，预留 provider 替换口 |
+| 后端 | Python 3.11+ / FastAPI / SQLAlchemy 2 / SQLite（WAL） |
+| 前端 | React 18 + Vite + TypeScript + Tailwind（纯 React 自带状态） |
+| LLM | DeepSeek `deepseek-v4-flash`（OpenAI 兼容，已验证可用） |
+| 认证 | 登录后 httpOnly Cookie（`sid` JWT，24h，无 refresh）+ bcrypt 密码 |
 | 邮件 | IMAP（拉取）/ SMTP（发送），同步串行处理，无任务队列 |
-| 调度 | Phase 1 用 CLI 轮询循环；APScheduler 属 Phase 4 |
+| 调度 | Phase 2 仍用 CLI 轮询循环；APScheduler 属 Phase 4 |
 
-## 2. 目录结构（Phase 1 相关）
+## 2. 目录结构
 
 ```
 shouhou-agent/
-├── .env.example            # 配置模板（复制为 .env 后填写）
+├── .env.example            # 配置模板（复制为 .env 后填写，.env 不提交）
 ├── data/                   # SQLite、附件、导出（git 忽略，运行时自动创建）
-└── backend/
-    ├── pyproject.toml      # 依赖与 pytest 配置
-    ├── docs/prompts/       # 分类 prompt（Phase 1：classify_chargeback.md）
-    ├── app/
-    │   ├── main.py         # FastAPI 入口（system 接口）
-    │   ├── config.py       # 全部配置来自 .env
-    │   ├── cli.py          # 本地命令行工具
-    │   ├── db/             # SQLite WAL + create_all + seed
-    │   ├── models/         # Phase 1 需要的 7 张表
-    │   ├── services/       # ingest/conversation/classifier/replier/mailer/audit
-    │   ├── api/system.py   # M-19 紧急暂停开关 + healthz
-    │   ├── llm/client.py   # DeepSeek 封装（mock 提供本地演示）
-    │   └── core/           # 异常与日志
-    └── tests/              # 45 个 pytest 用例（单元 + 集成）
+├── backend/
+│   ├── docs/prompts/       # classify_chargeback / translate_reply / retention_*
+│   ├── app/
+│   │   ├── main.py         # FastAPI 入口（system + auth + inbox + conversations + tickets）
+│   │   ├── config.py       # 全部配置来自 .env
+│   │   ├── cli.py          # init-db / poll / run / pause / resume / create-owner / simulate
+│   │   ├── core/security.py# bcrypt 密码哈希 + JWT（登出吊销）
+│   │   ├── api/            # auth / inbox / conversations / tickets / system
+│   │   ├── services/       # ingest / conversation / classifier / replier / retention /
+│   │   │                   # translator / mailer / audit
+│   │   └── models/         # customers / conversations / emails / replies / tickets / users / ...
+│   └── tests/              # 82 个 pytest 用例
+└── frontend/               # React 中文后台
+    ├── vite.config.ts      # 开发代理 /api → http://127.0.0.1:8000
+    └── src/
+        ├── pages/          # Login / Inbox / Tickets / ConversationDetail
+        └── components/     # RiskTag / Timeline / ReplyEditor / AuthGuard / Layout
 ```
 
 ## 3. 本地启动
 
-### 3.1 准备虚拟环境与依赖
+### 3.1 后端依赖
 
 ```bash
 cd backend
-python3 -m venv .venv                 # 或使用 uv：uv venv
+python3 -m venv .venv                 # 或 uv venv
 source .venv/bin/activate
 uv pip install -e '.[dev]'            # 或 pip install -e '.[dev]'
 ```
 
-> 说明：本项目已锁定 FastAPI==0.115.12 / anyio==4.9.0 等稳定版本，避免新版 TestClient 兼容问题。
-
 ### 3.2 配置 `.env`
 
 ```bash
-cp ../.env.example ../.env
+cp .env.example .env
 ```
 
-编辑 `../.env`，Phase 1 必填项：
+必填项：
 
 | 配置项 | 说明 |
 |---|---|
-| `EMAIL_USERNAME` / `EMAIL_PASSWORD` | Hostinger Titan 邮箱与应用专用密码（IMAP/SMTP 地址以 Titan 后台实际显示为准） |
-| `DEEPSEEK_API_KEY` | DeepSeek API Key（`LLM_PROVIDER=deepseek` 时必填） |
-| `AGENT_SERVICE_TOKEN` | 紧急暂停/恢复接口的访问令牌（Phase 2 会换成登录态） |
+| `EMAIL_USERNAME` / `EMAIL_PASSWORD` | Titan 邮箱（`support@shoplbora.com`）与密码 |
+| `DEEPSEEK_API_KEY` | DeepSeek API Key |
+| `SECRET_KEY` | JWT 签名密钥（`openssl rand -hex 32` 生成） |
+| `OWNER_USERNAME` / `OWNER_PASSWORD` | 后台老板账号（`init-db` 时自动建用户） |
 
-可选：
+可选：`LLM_PROVIDER`（`deepseek`/`openai`/`mock`）、`LLM_MODEL`、`SMTP_RATE_LIMIT_PER_HOUR`（生产建议 6）、
+`RETURN_POLICY_TEXT`（退货处理话术，留空则回复先索要订单号）、`RETENTION_MAX_ATTEMPTS`（挽留轮次上限，默认 2）、
+`COMPENSATION_MAX_USD`（补偿上限，默认 10 美元）。
 
-| 配置项 | 说明 |
-|---|---|
-| `LLM_PROVIDER` | `deepseek`（默认）/ `openai` / `mock`（离线演示，无需 Key） |
-| `LLM_MODEL` | 默认 `deepseek-v4-flash`，以你 DeepSeek 账户实际可用模型为准 |
-| `LOW_CONFIDENCE_THRESHOLD` | 分类置信度低于该值转人工（默认 0.6） |
-| `CONVERSATION_WINDOW_DAYS` | 会话合并窗口（默认 7 天） |
-| `SMTP_RATE_LIMIT_PER_HOUR` | 每小时发送上限，0=不限（生产建议 6） |
-| `POLL_INTERVAL_SECONDS` | 轮询间隔（默认 90 秒） |
-
-### 3.3 初始化数据库
+### 3.3 初始化数据库并创建老板账号
 
 ```bash
 cd backend
 python -m app.cli init-db
+# 如未在 .env 设置 OWNER_PASSWORD，或想改密码：
+python -m app.cli create-owner --username boss --password '你的密码'
 ```
 
-会自动在 `data/app.db` 建表并写入 `system_state` 种子行。
-
-## 4. 验证步骤
-
-### 4.1 最快验证：无邮箱、无 API Key 的离线演示
-
-使用内置 `mock` LLM（确定性返回），`--dry-run` 不真正发信，只打印将发送的内容：
+### 3.4 启动后端
 
 ```bash
 cd backend
-python -m app.cli simulate --risk low --dry-run    # 低风险 → 自动回复
-python -m app.cli simulate --risk high --dry-run   # 拒付/高风险 → 转人工，不发信
-python -m app.cli simulate --risk medium --dry-run # 退款请求 → 转人工（挽留属 Phase 2）
+python -m uvicorn app.main:app --port 8000
 ```
 
-输出中 `action=auto_sent risk=low` 即表示低风险自动回复链路跑通；同时可在 SQLite 中查看
-`emails` / `conversations` / `replies` / `audit_logs` 记录。
+### 3.5 启动前端
 
-### 4.2 真实邮箱验证（DeepSeek Key + Titan 邮箱）
+```bash
+cd frontend
+npm install
+npm run dev            # http://localhost:5173，/api 自动代理到 8000
+```
 
-1. 在 `.env` 填好邮箱与 DeepSeek 配置。
-2. 用另一个邮箱向 `EMAIL_USERNAME` 发一封**低风险英文咨询**，例如：
+生产构建：`npm run build`（产物在 `frontend/dist`）。
+
+## 4. 验证步骤
+
+### 4.1 最快验证：无邮箱、无 API Key 的离线演示（Mock LLM）
+
+```bash
+cd backend
+LLM_PROVIDER=mock python -m app.cli simulate --risk low --dry-run      # 低风险 → 自动回复
+LLM_PROVIDER=mock python -m app.cli simulate --risk medium --dry-run   # 中风险 → 待审核草稿
+LLM_PROVIDER=mock python -m app.cli simulate --risk high --dry-run     # 拒付 → 转人工，不发信
+LLM_PROVIDER=mock python -m app.cli simulate --reason size --dry-run       # 尺码不符 → 换货挽留自动发
+LLM_PROVIDER=mock python -m app.cli simulate --reason not_wanted --dry-run # 犹豫 → 补偿草稿进待审核
+LLM_PROVIDER=mock python -m app.cli simulate --reason quality --dry-run    # 质量问题 → 不挽留，照单退换
+```
+
+然后登录后台（`http://localhost:5173`）查看收件箱与会话时间轴。
+
+### 4.2 真实邮箱完整链路（DeepSeek + Titan）
+
+1. `.env` 填好邮箱与 DeepSeek 配置。
+2. 用另一个邮箱向 `support@shoplbora.com` 发一封**低风险英文咨询**：
    `Hi, what is the size of the XL t-shirt in centimeters?`
 3. 手动跑一轮拉取：
 
@@ -110,36 +124,32 @@ python -m app.cli simulate --risk medium --dry-run # 退款请求 → 转人工�
    python -m app.cli poll --once
    ```
 
-4. 观察日志出现 `Reply id=... sent to ...`，客户邮箱收到 AI 英文回复；同一主题的后续邮件会归入同一会话。
-5. 常驻运行（每 90 秒轮询）：
+4. 日志出现 `Reply id=... sent to ...`，客户邮箱收到英文回复；
+   后台「收件箱」出现该邮件且状态为「已发送」。
+5. 常驻运行：`python -m app.cli run`。
 
-   ```bash
-   python -m app.cli run
-   ```
+### 4.3 中风险审核流（Phase 2 新增）
 
-### 4.3 紧急暂停开关（F9）
+1. 发一封中风险咨询，例如询问退换货政策 → 系统生成草稿进「待审核」。
+2. 后台「收件箱 → 待审核」打开会话，点「审核通过并发送」；或「驳回为草稿」后编辑再发送。
+
+### 4.4 退换货挽留闭环（Phase 2 新增）
+
+1. 客户来信「尺码不符想退换」→ 系统自动发出换货挽留信（不涉钱，直接发）。
+2. 客户回信「OK, send the replacement」→ 系统识别为接受，发确认信，挽留结束。
+3. 客户来信「犹豫/买错想退款」→ 系统生成**补偿草稿（pending_review）**，老板审核后发送。
+4. 客户坚持退货且挽留轮次达上限（默认 2）→ 系统停止挽留，发退货处理回复。
+5. 质量/物流损坏 → 不挽留，直接发退货处理回复。
+
+### 4.5 紧急暂停（F9）
 
 ```bash
 cd backend
-python -m app.cli status              # 查看状态
-python -m app.cli pause --reason "老板手动暂停"   # 暂停：只拉取不处理，不自动回复
-python -m app.cli resume              # 恢复
+python -m app.cli pause --reason "老板手动暂停"
+python -m app.cli resume
 ```
 
-暂停期间新邮件保持 IMAP 未读，恢复后下一轮轮询自动补处理（不丢信、不重发已处理邮件）。
-
-也可以走 HTTP 接口（需 `.env` 中配置 `AGENT_SERVICE_TOKEN`）：
-
-```bash
-python -m uvicorn app.main:app --port 8000
-curl http://127.0.0.1:8000/api/v1/system/status
-curl -X POST http://127.0.0.1:8000/api/v1/system/pause \
-  -H 'Content-Type: application/json' -d '{"reason":"test"}' \
-  -H 'X-Service-Token: 你的令牌'
-curl -X POST http://127.0.0.1:8000/api/v1/system/resume \
-  -H 'X-Service-Token: 你的令牌'
-curl http://127.0.0.1:8000/api/v1/healthz
-```
+或登录后台后调用 `POST /api/v1/system/pause`（JWT 登录态，不再用 X-Service-Token）。
 
 ## 5. 运行测试
 
@@ -148,12 +158,15 @@ cd backend
 python -m pytest
 ```
 
-当前结果：`45 passed`（会话合并、分类路由、IMAP 解析、SMTP 重试/限流、端到端链路、暂停开关 API）。
+当前结果：**82 passed**（含 Phase 1 全部用例 + 认证/审核流/挽留/管理 API 新用例）。
 
-## 6. Phase 1 边界（重要）
+## 6. Phase 2 边界（重要）
 
-- ✅ 已实现：IMAP 拉取 + Message-ID 去重、会话合并（In-Reply-To / 主题相似度 / 7 天窗口）、DeepSeek 分类（含拒付关键词+LLM 双通道）、低风险自动回复、SMTP 重试、审计日志、紧急暂停。
-- ❌ 未实现（属后续 Phase）：后台登录与审核（Phase 2）、退换货挽留（Phase 2）、高风险安抚信与工单（Phase 3）、知识库与标准 QA（Phase 3）、APScheduler 与告警（Phase 4）、Docker 部署（Phase 4）。
-- ⚠️ Phase 1 对**非低风险**邮件（高/中/无法判定）的处理：完整落库 + 写审计，但**不自动回复**（Phase 2/3 补审核、工单、安抚信流程）。
+- ✅ 已实现：登录（bcrypt + httpOnly JWT + 防爆破）、中风险待审核流（`pending_review` + 通过/驳回/编辑/发送）、
+  退换货挽留闭环（原因分类 → 换货/补偿/放行 + 轮次上限 + 接受判定）、中文→英文翻译接口、人工回复发送、
+  收件箱/会话时间轴/工单/回收站/拆分合并/附件下载 API、前端登录/收件箱/工单/会话详情页、CLI `create-owner` 与挽留演示。
+- ❌ 未实现（属后续 Phase）：高风险安抚信与工单自动生成（Phase 3）、知识库与标准 QA（Phase 3）、
+  APScheduler 与告警（Phase 4）、审计查询页与设置页（Phase 4）、Docker 部署（Phase 4）。
+- ⚠️ 工单表与 API 已就绪但 Phase 2 不自动创建工单（高风险邮件仍转人工等待 Phase 3 补齐）。
 
 详细说明与待确认问题见 `IMPLEMENTATION_NOTES.md`。

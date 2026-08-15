@@ -27,3 +27,4 @@ class Conversation(Base):
     customer = relationship("Customer", back_populates="conversations")
     emails = relationship("Email", back_populates="conversation")
     replies = relationship("Reply", back_populates="conversation")
+    tickets = relationship("Ticket", back_populates="conversation")

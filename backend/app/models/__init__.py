@@ -7,6 +7,8 @@ from app.models.customer import Customer
 from app.models.email import Email
 from app.models.reply import Reply
 from app.models.system_state import SystemState
+from app.models.ticket import Ticket
+from app.models.user import User
 
 __all__ = [
     "Attachment",
@@ -16,4 +18,6 @@ __all__ = [
     "Email",
     "Reply",
     "SystemState",
+    "Ticket",
+    "User",
 ]

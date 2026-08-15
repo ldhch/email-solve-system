@@ -1,4 +1,4 @@
-"""FastAPI entrypoint (M-01, Phase 1 scope)."""
+"""FastAPI entrypoint (M-01)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.auth import router as auth_router
+from app.api.conversations import router as conversations_router
+from app.api.inbox import router as inbox_router
 from app.api.system import router as system_router
+from app.api.tickets import router as tickets_router
 from app.config import get_settings
 from app.core.logging import setup_logging
 from app.db.session import init_db
@@ -30,10 +34,17 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version="0.1.0",
-        description="After-sales email auto-reply backend (Phase 1)",
+        description="After-sales email auto-reply backend (Phase 2)",
         lifespan=lifespan,
     )
-    app.include_router(system_router)
+    for router in (
+        system_router,
+        auth_router,
+        inbox_router,
+        conversations_router,
+        tickets_router,
+    ):
+        app.include_router(router)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -49,7 +60,7 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def root() -> dict:
-        return {"app": settings.app_name, "phase": 1, "status": "ok"}
+        return {"app": settings.app_name, "phase": 2, "status": "ok"}
 
     return app
 

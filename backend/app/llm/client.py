@@ -133,11 +133,7 @@ class MockLLMClient(BaseLLMClient):
         user_text = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
         lower = user_text.lower()
         system_prompt_lower = (system_prompt or "").lower()
-        if (
-            "classify" in system_prompt_lower
-            or "classifier" in system_prompt_lower
-            or "risk_level" in system_prompt_lower
-        ):
+        if "risk_level" in system_prompt_lower:  # triage classifier
             if any(word in lower for word in ("chargeback", "dispute", "sue", "lawyer")):
                 return json.dumps(
                     {
@@ -148,7 +144,69 @@ class MockLLMClient(BaseLLMClient):
                         "summary_cn": "客户威胁发起拒付（模拟判定）",
                     }
                 )
-            if any(word in lower for word in ("refund", "return", "exchange", "退货", "退款")):
+            if "return policy" in lower:
+                return json.dumps(
+                    {
+                        "risk_level": "medium",
+                        "confidence": 0.85,
+                        "category": "policy",
+                        "chargeback_risk": False,
+                        "summary_cn": "客户咨询退换货政策（模拟判定）",
+                    }
+                )
+            if "warranty" in lower:
+                return json.dumps(
+                    {
+                        "risk_level": "medium",
+                        "confidence": 0.85,
+                        "category": "warranty",
+                        "chargeback_risk": False,
+                        "summary_cn": "客户咨询保修说明（模拟判定）",
+                    }
+                )
+            if "shipping address" in lower or "change my order" in lower:
+                return json.dumps(
+                    {
+                        "risk_level": "medium",
+                        "confidence": 0.85,
+                        "category": "order_modification",
+                        "chargeback_risk": False,
+                        "summary_cn": "客户要求修改订单（模拟判定）",
+                    }
+                )
+            if "tracking" in lower or "where is my" in lower or "shipping status" in lower:
+                return json.dumps(
+                    {
+                        "risk_level": "medium",
+                        "confidence": 0.85,
+                        "category": "logistics_inquiry",
+                        "chargeback_risk": False,
+                        "summary_cn": "客户查询物流（模拟判定）",
+                    }
+                )
+            if "invoice" in lower:
+                return json.dumps(
+                    {
+                        "risk_level": "medium",
+                        "confidence": 0.85,
+                        "category": "invoice",
+                        "chargeback_risk": False,
+                        "summary_cn": "客户索要发票（模拟判定）",
+                    }
+                )
+            if any(
+                word in lower
+                for word in (
+                    "refund",
+                    "return",
+                    "exchange",
+                    "defective",
+                    "broken",
+                    "money back",
+                    "退货",
+                    "退款",
+                )
+            ):
                 return json.dumps(
                     {
                         "risk_level": "medium",
@@ -167,6 +225,16 @@ class MockLLMClient(BaseLLMClient):
                     "summary_cn": "客户咨询产品规格（模拟判定）",
                 }
             )
+        if "accept_retention" in system_prompt_lower:  # retention acceptance
+            if any(kw in lower for kw in ("no", "refund", "return", "cancel", "still want")):
+                return json.dumps({"verdict": "reject_retention"})
+            if any(kw in lower for kw in ("ok", "yes", "agree", "send the replacement", "keep it")):
+                return json.dumps({"verdict": "accept_retention"})
+            return json.dumps({"verdict": "uncertain"})
+        if '"reason"' in system_prompt_lower:  # retention reason classification
+            return json.dumps({"reason": "other"})
+        if "translate" in system_prompt_lower:  # Chinese -> English translation
+            return f"(Mock translation) {user_text}"
         return (
             "Thank you for reaching out to us. (Mock reply - replace LLM_PROVIDER=deepseek "
             "with a real API key for production.)"
@@ -180,13 +248,13 @@ def build_llm_client(settings: Settings) -> BaseLLMClient:
     if provider == "deepseek":
         return OpenAIClient(
             settings,
-            base_url="https://api.deepseek.com",
+            base_url=settings.llm_base_url,
             api_key=settings.deepseek_api_key,
         )
     if provider == "openai":
         return OpenAIClient(
             settings,
-            base_url="https://api.openai.com/v1",
+            base_url=settings.openai_base_url,
             api_key=settings.openai_api_key,
         )
     if provider == "mock":

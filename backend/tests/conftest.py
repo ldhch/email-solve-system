@@ -21,10 +21,25 @@ def settings() -> Settings:
         llm_provider="mock",
         email_username="bot@example.com",
         email_password="test-password",
+        secret_key="test-secret-key-for-jwt-0123456789abcdef0123456789",
+        owner_username="boss",
+        owner_password="test-owner-password",
         agent_service_token="test-token",
         smtp_rate_limit_per_hour=0,
         attachment_dir="/tmp/shouhou-agent-test-attachments",
+        return_policy_text="Return address: 123 Test Street, return within 30 days.",
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_login_rate_limiter():
+    """The auth rate limiter is module-global; isolate it per test."""
+
+    import app.api.auth as auth_module
+
+    auth_module._ip_attempts.clear()
+    auth_module._account_failures.clear()
+    yield
 
 
 @pytest.fixture()

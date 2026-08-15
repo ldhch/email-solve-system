@@ -1,4 +1,4 @@
-"""Phase-1 CLI: DB init, polling runner, kill switch, offline simulation.
+"""CLI: DB init, polling runner, kill switch, owner password, offline simulation.
 
 Usage (from backend/):
     python -m app.cli init-db
@@ -7,7 +7,9 @@ Usage (from backend/):
     python -m app.cli status
     python -m app.cli pause --reason "..."
     python -m app.cli resume
+    python -m app.cli create-owner --username boss --password '...'
     python -m app.cli simulate --risk low --dry-run
+    python -m app.cli simulate --reason size --dry-run
 """
 
 from __future__ import annotations
@@ -19,9 +21,11 @@ import time
 
 from app.config import get_settings
 from app.core.logging import get_logger
+from app.core.security import hash_password
 from app.db.session import get_session_factory, init_db
 from app.llm.client import MockLLMClient
 from app.models.system_state import SystemState
+from app.models.user import User
 from app.services.audit import log_action, utcnow
 from app.services.ingest import IngestService, ParsedEmail
 
@@ -114,11 +118,45 @@ def cmd_resume(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_create_owner(args: argparse.Namespace) -> int:
+    """Create or update the owner account password (bcrypt cost 12)."""
+
+    settings = get_settings()
+    username = args.username or settings.owner_username
+    init_db(settings)
+    factory = get_session_factory(settings)
+    from sqlalchemy import select
+
+    with factory() as db:
+        user = db.execute(
+            select(User).where(User.username == username)
+        ).scalar_one_or_none()
+        if user is None:
+            user = User(
+                username=username,
+                password_hash=hash_password(args.password),
+                role="owner",
+                created_at=utcnow(),
+            )
+            db.add(user)
+            log_action(db, "owner_created", "user", user.id, ip="cli", commit=False)
+            db.commit()
+            logger.info("Owner user %r created.", username)
+        else:
+            user.password_hash = hash_password(args.password)
+            log_action(db, "owner_password_changed", "user", user.id, ip="cli", commit=False)
+            db.commit()
+            logger.info("Owner %r password updated.", username)
+    return 0
+
+
 def cmd_simulate(args: argparse.Namespace) -> int:
-    """Offline demo: inject a synthetic email and run the Phase-1 pipeline.
+    """Offline demo: inject a synthetic email and run the pipeline.
 
     Uses the mock LLM provider so no API key is needed; `--dry-run` skips real
-    SMTP and just logs what would be sent.
+    SMTP and just logs what would be sent. `--reason` simulates the Phase-2
+    retention flow (size -> exchange offer, not_wanted -> compensation draft,
+    quality -> return handling).
     """
 
     settings = get_settings()
@@ -132,17 +170,29 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         if args.dry_run:
             service.mailer = _DryRunMailer()
 
-        risk = args.risk
-        if risk == "high":
+        reason = getattr(args, "reason", None)
+        if reason == "size":
+            body = "I bought the XL shirt but it does not fit. I want to return it for a smaller size."
+            subject = "Return request - wrong size"
+        elif reason == "not_wanted":
+            body = "I changed my mind and no longer want this item. Please refund my order."
+            subject = "Refund request - changed my mind"
+        elif reason == "quality":
+            body = "The product I received is defective. I want my money back."
+            subject = "Refund request - defective product"
+        elif args.risk == "high":
             body = "This product is defective and I will file a chargeback with my bank if you don't fix it."
-        elif risk == "medium":
-            body = "I want a refund for the item I ordered last week."
+            subject = "Dispute"
+        elif args.risk == "medium":
+            body = "Could you explain your return policy before I place an order?"
+            subject = "Return policy question"
         else:
             body = "Hi, what is the size of the XL t-shirt in centimeters? Thanks!"
+            subject = "Product size question"
 
         parsed = ParsedEmail(
-            message_id=f"sim-{args.risk}-{int(time.time())}@local",
-            subject=f"Question about my order ({risk})",
+            message_id=f"sim-{reason or args.risk}-{int(time.time())}@local",
+            subject=subject,
             from_email=args.from_email,
             from_name="Sim Customer",
             to_email=settings.email_username,
@@ -188,9 +238,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     simulate = sub.add_parser("simulate", help="offline demo email (mock LLM)")
     simulate.add_argument("--risk", choices=["low", "medium", "high"], default="low")
+    simulate.add_argument(
+        "--reason",
+        choices=["size", "not_wanted", "quality"],
+        help="Phase-2 retention demo (overrides --risk)",
+    )
     simulate.add_argument("--from-email", default="customer@example.com")
     simulate.add_argument("--dry-run", action="store_true", help="do not actually send SMTP")
     simulate.set_defaults(func=cmd_simulate)
+
+    owner = sub.add_parser("create-owner", help="create/update the owner login")
+    owner.add_argument("--username", default=None, help="default: OWNER_USERNAME from .env")
+    owner.add_argument("--password", required=True, help="new owner password")
+    owner.set_defaults(func=cmd_create_owner)
 
     return parser
 

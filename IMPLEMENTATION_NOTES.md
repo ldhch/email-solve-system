@@ -1,70 +1,83 @@
-# IMPLEMENTATION_NOTES — Phase 1（里程碑 A）
+# IMPLEMENTATION_NOTES — Phase 2（里程碑 B）
 
-> 记录日期：2026-08-14
-> 范围：TECH.md 第九章 Phase 1，未实现 Phase 2+ 内容
+> 记录日期：2026-08-15
+> 范围：TECH.md 第九章 Phase 2（后台串联 + 挽留），未实现 Phase 3+ 内容
+> 上一轮待确认问题已由老板答复，见文末「上一轮问题结论」
 
 ## ✅ 已完成项（对照 TECH.md 模块清单）
 
 | 模块 | 内容 | 状态 |
 |---|---|---|
-| M-01 | FastAPI 入口 `main.py`，挂载 system 路由，async 异常处理器（M-21 要求） | ✅ |
-| M-02 | `config.py`：pydantic-settings 从 `.env` 加载全部配置；相对 SQLite 路径锚定仓库根 | ✅ |
-| M-03 | `db/`：SQLite WAL + busy_timeout，`create_all` + seed（`system_state` 单行）；无迁移框架 | ✅ |
-| M-04 | `services/ingest.py`：IMAP UNSEEN 拉取（3 次登录重试）、RFC822 解析、Message-ID 去重、2MB 正文截断、5MB 告警日志、附件落盘、bleach 清洗 HTML | ✅ |
-| M-05 | `services/conversation.py`：In-Reply-To/References 优先 → 主题精确/`difflib≥0.85` 相似度兜底 + 7 天窗口；会话风险取最高；窗口滑动 | ✅ |
-| M-06 | `services/classifier.py`：LLM 输出 risk_level/confidence/category/chargeback_risk/summary_cn；拒付关键词+LLM 双通道；低置信度降级 `unknown` 转人工；`RISK_ACTIONS` 硬编码映射 | ✅ |
-| M-07 | `services/replier.py`：聚合会话最近 6 条记录注入 prompt，禁止编造事实；生成→建 Reply→SMTP→sent/failed | ✅（Phase 1 仅注入会话历史，知识库/QA 属 Phase 3） |
-| M-09 | `llm/client.py`：DeepSeek（OpenAI 兼容端点）封装，重试 + token 统计；`LLM_PROVIDER` 可切 openai/mock；新增 provider 只需加一个类 | ✅ |
-| M-11 | `services/mailer.py`：SMTP_SSL 发送、3 次重试、线程保持（In-Reply-To/References）、可选每小时限流 | ✅ |
-| M-17 | `services/audit.py`：最小版审计（classified/reply_sent/reply_failed/requires_manual/paused_skipped/silenced_skipped/pause/resume/pipeline_failed） | ✅ |
-| M-19 | `api/system.py`：`GET /status`、`POST /pause`、`POST /resume`、`GET /healthz`；暂停态由 `system_state.ai_paused` 控制，管道处理前检查 | ✅ |
-| — | `cli.py`：init-db / poll / run / status / pause / resume / simulate（离线演示） | ✅ |
-| — | 测试：45 个 pytest 用例全部通过（见文末输出） | ✅ |
-| — | README.md：本地启动、.env 说明、验证方法 | ✅ |
+| M-16 | `api/auth.py` + `core/security.py`：bcrypt(cost=12) 密码哈希；登录成功下发 httpOnly `sid` Cookie（JWT HS256，24h，SameSite=Lax，生产 Secure）；登出吊销（jti 黑名单）；`/auth/me`；单 IP 5 次/分钟 + 账号 10 次/小时锁 30 分钟（防爆破）；登录/登出写审计 | ✅ |
+| M-15 | 老板后台 REST API：收件箱列表/详情、会话时间轴、人工回复（中文→翻译→发送）、`replies/{id}/approve|reject|send|PATCH`、回收站（软删/30 天恢复）、工单列表/状态流转/回收站、拆分会话/合并会话、附件下载 | ✅ |
+| M-10 | `services/translator.py` + `docs/prompts/translate_reply.md`：中文→英文翻译，语气/长度/术语规则 | ✅ |
+| M-06 增强 | 中风险（默认 review）→ 生成草稿 `status=pending_review` 进待审核；`replies/{id}/approve`（审核后 SMTP 发送）、`reject`（退回 draft）、`PATCH`（编辑重译）、`send`（草稿直接发送）；物流/订单修改/发票仍转人工 | ✅ |
+| M-13 | `services/retention.py`：原因分类（质量/损坏→不挽留照单退换；尺码→换货 AI 直发；犹豫/买错→补偿草稿待审核；无法判定→保守转老板审核）；轮次上限 `RETENTION_MAX_ATTEMPTS`（默认 2）超限强制放行退货；`is_customer_accepted()` 关键词+LLM 判定，明确接受才停止挽留；拒付信号由分类器先行拦截绝不进入挽留 | ✅ |
+| F-01/F-02 | 前端 Vite+React+TS+Tailwind 脚手架；Axios 封装（withCredentials + 401 跳登录） | ✅ |
+| F-03 | 登录页（中文界面，错误提示含锁定/限流） | ✅ |
+| F-04 | 收件箱：风险标签、中文摘要、状态筛选（全部/待审核/高风险）、关键字搜索、分页 | ✅ |
+| F-05 | 工单页：待处理/处理中/已解决筛选、SLA 逾期标红、开始处理/解决（解决必填中文回复） | ✅ |
+| F-06 | 会话详情：时间轴 + 中英切换 + 待审核草稿「通过/驳回」+ 草稿编辑发送 + 人工回复输入框（5s 轮询，无 WebSocket） | ✅ |
+| F-10 | RiskTag / Timeline / ReplyEditor / AuthGuard / Layout 组件 | ✅ |
+| — | `cli.py`：新增 `create-owner`；`simulate` 支持 `--reason size|not_wanted|quality` 演示挽留链路 | ✅ |
+| — | 测试：82 个 pytest 用例全部通过（见文末输出） | ✅ |
+| — | README.md：本地启动（后端+前端）、.env 说明、离线/真实邮箱验证方法 | ✅ |
 
 ## ⚠️ 未决项 / 已知风险
 
-1. **本机沙箱限制导致的三处工程决策**（正常服务器无影响）：
-   - 本环境 seccomp 使 anyio 线程池无法执行任务（同一代码在沙箱外验证正常）。为避免 `pytest` 在本环境挂起，FastAPI 端点与依赖统一写成 `async`，并在 `main.py` 注册 async 异常处理器。
-   - `starlette.testclient`（依赖 httpx2 portal）在本环境不可用，API 测试改用 `httpx.ASGITransport` + 单事件循环 `asyncio.Runner`。
-   - 依赖锁定：`fastapi==0.115.12` / `starlette 0.46.x` / `anyio==4.9.0`（新版 TestClient 有挂起问题，与沙箱无关的正常环境也可能受影响）。
-2. **`deepseek-v4-flash` 模型名未实测**：TECH.md 指定该模型名，但 DeepSeek 账户实际可用模型 ID 需在控制台确认；若调用报 404/模型不存在，改 `LLM_MODEL` 即可（Phase 1 不写死）。
-3. **Titan IMAP/SMTP 地址与端口未实测**：`.env.example` 使用官方常见值 `imap.titan.email` / `smtp.titan.email:465`，需按 Titan 后台实际显示核对。
-4. **非低风险邮件的 Phase 1 兜底**：high/medium/unknown 邮件完整落库并写审计，但**不自动回复、不建工单、不发安抚信**（工单/安抚属 Phase 3，审核队列属 Phase 2）。这是「宁可保守不自动发」的刻意取舍，等待后续阶段补齐。
-5. **退款/退货/换货请求在 Phase 1 一律不自动回复**（挽留策略属 Phase 2），分类为 `refund_request` 即转人工。
-6. **调度**：Phase 1 用 `cli run` 简单轮询循环；APScheduler（M-12）留到 Phase 4。
-7. **`users` 表与 `audit_logs.actor_id` 外键**：Phase 1 未建 users 表，`actor_id` 为无外键的可空整数（NULL=AI 管道）；Phase 2 建表后补外键。
-8. **SMTP 限流默认关闭**（`SMTP_RATE_LIMIT_PER_HOUR=0`）；R5 建议生产设 6。发送失败的回复会保留 failed 草稿，并在下一轮拉取时复用原草稿重发（不再重新走 LLM）；限流触发时同样按 failed 处理，待下轮重发。
-9. **暂停期间**：邮件只拉取不处理、保持 IMAP 未读，恢复后由轮询自动补处理（符合 PRD F9 / TECH 5.6 积压处理语义）。
-10. **审计为最小版**：未做后台查询页、CSV 导出、防篡改（均属 Phase 4）。
-11. **healthz 不含 scheduler 心跳**：Phase 1 无 scheduler，返回 `db/uptime_sec`；Phase 4 按 N-4 补齐。
+1. **工单不自动创建**：Phase 2 提供 `tickets` 表与 API，但**不自动生成工单**（高风险邮件仍 `requires_manual`），
+   安抚信与工单自动生成属 Phase 3（M-06 增强）。
+2. **`deepseek-v4-flash` 为推理模型**：已实测可用，但推理 token 计入 `max_tokens` 预算；
+   若长回复被截断，需把 `LLM_MAX_TOKENS` 从 2048 提到 4096。分类/翻译短输出不受影响。
+3. **登录防爆破为内存态**：重启后计数清零（单进程可接受）；如需跨重启持久化再改 DB 表（P1）。
+4. **登出吊销为进程内存 jti 黑名单**：重启后失效；因 Cookie 本身 24h 过期，风险可控。
+5. **错误响应格式**：TECH 5 契约的统一错误包体未全量实施——管理接口成功返回 `{code,data,msg}`，
+   错误仍走 Phase 1 的 `{detail}` 格式（避免破坏既有接口）；前端已兼容两种格式。
+6. **挽留「原因无法判定」走老板审核**：TECH `RETENTION_STRATEGIES["other"]="none"` 原意为直接退换，
+    但按「宁可保守转人工」原则改为 `review`（草稿待审核），避免对不明诉求自动发信。
+7. **`is_customer_accepted` 短语优先**：TECH B-3 要求负向词优先，但「no need refund」这类明确接受会
+    被「no」误判为拒绝导致继续挽留、拖延退货；已改为正向短语优先（含否定词的明确接受先识别），
+    其余仍负向优先、LLM 兜底、不确定默认按拒绝处理。
+8. **reply_type 扩展**：新增 `retention_release` / `retention_accepted` 两个回复类型（TECH 原表 4 种），
+    用于标记「已放行退货」与「已接受挽留」，避免重复发送同内容。
+9. **拆分/合并 UI 未做**：后端 API 已就绪且有测试；前端入口留待后续（PRD 异常场景 18 的界面化）。
+10. **SMTP 限流已设 6**：`.env` 中 `SMTP_RATE_LIMIT_PER_HOUR=6`（老板表示 5 也可以，按 TECH 建议取 6）。
+11. **`.env` 含真实凭据**：仅存在于本地 gitignored `.env`，未提交、未入文档；请勿外发。
+12. **前端未做 E2E**：Phase 2 以 pytest 为门禁；浏览器端仅做了构建验证（`tsc && vite build` 通过）。
+13. **模拟演示数据留在本地库**：`data/app.db` 含本次冒烟测试的邮件；如需清空：
+    `rm data/app.db && python -m app.cli init-db`（会重建空库并保留 owner）。
+14. **API 触发的发送失败缺少「重发」入口**：人工回复/审核通过时 SMTP 失败会落库 `status=failed`，
+    管道自动回复失败会在下轮重发；但后台 UI 暂未提供 failed 草稿的「重发」按钮（可后续补）。
 
-## 🔧 Claude 审查后修复记录（2026-08-14）
+## 🔧 实现备注（关键决策）
 
-按外部审查结论修复以下问题：
-
-| # | 问题 | 修复 |
-|---|---|---|
-| 14 | Replier 未把当前来信注入 prompt，导致低风险回复“盲答历史” | `_conversation_history` 现在显式追加当前邮件作为最后一条 `[customer]` 消息，并新增回归测试 |
-| 3 | 拒付关键词 `ftc`/`bbb` 等短词误命中普通正文 | `_keyword_hit` 改为 `\b` 词边界正则匹配，并新增 `softcover` 不误命中 `ftc` 的测试 |
-| 6 | SMTP 失败邮件下一轮被当重复跳过，从未重发 | 新增 `_resend_failed_reply`：重复拉取时复用上一条 failed 草稿直接重发，不重新分类/生成，并新增测试 |
-| 1 | `fetch_and_process` 每次循环泄漏 IMAP 半开连接 | 自有连接在 `finally` 中 `logout/close` |
-| 2 | `pipeline_failed` 审计写在已回滚 session 上 | 支持注入 `session_factory`，失败审计改用独立短 session；CLI 已传入 |
-| 7 | `cli run` 仅兜住 IMAP/配置异常，单封坏邮件可杀进程 | 改为 `except Exception` 记录后继续轮询 |
-| 10 | 附件 `stored_path` 存绝对路径，换机后失效 | 改为相对 data 目录的路径（如 `attachments/<uuid>_name`） |
-| 17 | resume 后 `paused_at/paused_reason` 残留 | API 与 CLI 恢复时清空这两项，保留 `resumed_at`，并更新测试 |
-| 11 | 合成 Message-ID 未区分同秒双发 | 合成哈希加入 `uid` |
-| 21 | 附件无大小上限，超大附件可写满磁盘 | 新增 `MAX_ATTACHMENT_BYTES=20MB`，超限丢弃并告警日志 |
-| 22 | 时区归一化重复赋值 | 删除冗余行 |
+- 路由选择：`high/unknown` → manual；`refund_request`（非拒付）→ 挽留流；`medium`（非物流/订单/发票）→ 待审核草稿；`low` → 自动发送。
+- 挽留轮次在「发送换货挽留信 / 生成补偿草稿」时 `retention_attempts += 1`；质量/损坏不计轮次。
+- 已发过 `retention_release` / `retention_accepted` 后，同一会话再收退款诉求 → 转人工，不重复发信。
+- 人工回复：老板中文 → LLM 翻译英文 → SMTP 发送，保留 `In-Reply-To` 线程；翻译失败返回 422，SMTP 失败 502 且草稿落库可重发。
+- 暂停/恢复接口改为 JWT 登录态（不再用 X-Service-Token；该 token 保留给未来 AI 内部调用）。
 
 ## ❓ 待老板确认的问题（一次性集中列出）
 
-1. **DeepSeek 模型 ID**：你的 DeepSeek 账户中实际可用模型是否就是 `deepseek-v4-flash`？（若不是，请告知正确模型名，我改 `.env.example` 默认值；否则线上首次调用会失败）
-2. **Titan 邮箱参数**：请在 Titan 后台确认 IMAP 地址/端口、SMTP 地址/端口，以及是否支持应用专用密码；本阶段按 `imap.titan.email:993` / `smtp.titan.email:465` 预设。
-3. **Phase 1 非低风险邮件暂不自动回复**：高风险（含拒付）与中风险邮件本阶段只入库+审计、不发信，等 Phase 2/3 补审核与安抚工单——是否接受此过渡行为？
-4. **暂停接口的令牌**：Phase 1 用 `AGENT_SERVICE_TOKEN` 保护暂停/恢复接口（老板先通过 CLI 或 curl 使用）；Phase 2 换成登录后自动失效——是否接受？
-5. **SMTP 发送频率**：**上线前必须将 `SMTP_RATE_LIMIT_PER_HOUR` 设为 6**（当前默认 0=不限流，仅用于本地调试）。
-6. **回复质量确认**：Phase 1 回复只注入会话历史，无知识库/QA（Phase 3 才有）；低风险咨询类回复是否满足预期？
+1. **老板后台初始密码**：本次已随机生成并写入 `.env`（登录账号 `boss`）。请**首次登录后立即修改**：
+   `python -m app.cli create-owner --username boss --password '新密码'`；是否接受这个初始密码方案？
+2. **退货话术（RETURN_POLICY_TEXT）**：目前留空，放行退货时回复「请提供订单号以便安排退货」。
+   请提供你们的退货地址/流程文案，我填入 `.env`（例如：`Return address: xxx, return within 30 days.`）。
+3. **补偿上限**：补偿挽留草稿由 AI 生成、老板审核后发送，默认上限 `COMPENSATION_MAX_USD=10`；
+   是否维持 10 美元？
+4. **中风险自动回复范围**：当前中风险一律进待审核（含保修/政策咨询）。若觉得这类咨询可直接发，
+   可把 `RISK_ACTIONS["medium"]` 改为 `auto_send`（一行改动，需老板确认后我再改）。
+
+## 上一轮问题结论（老板已答复）
+
+| # | 问题 | 结论 |
+|---|---|---|
+| 1 | DeepSeek 模型 ID | 已实测 `deepseek-v4-flash` 可用（推理模型），无需修改 |
+| 2 | Titan IMAP/SMTP 参数 | 按老板提供值配置：`imap.titan.email:993` / `smtp.titan.email:465`，SSL |
+| 3 | Phase 1 非低风险暂不自动回复 | 接受过渡行为；Phase 2 中风险已进审核、退换货已进挽留 |
+| 4 | 暂停接口令牌 | 接受；Phase 2 已换为登录态 JWT |
+| 5 | SMTP 频率 | 老板表示 5 也可以；按 TECH 建议设 6 |
+| 6 | 回复质量（无知识库/QA） | 按推荐接受；知识库/QA 属 Phase 3 |
 
 ## 测试运行输出（本阶段交付证据）
 
@@ -73,19 +86,24 @@
 platform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0
 rootdir: /home/work-first/project/other-agent/kefu/shouhou-agent/backend
 configfile: pyproject.toml
-collected 45 items
+collected 82 items
 
-tests/test_api_system.py ......                                          [ 13%]
-tests/test_classifier.py ......                                          [ 26%]
-tests/test_config.py ....                                                [ 35%]
-tests/test_conversation.py ..........                                    [ 57%]
-tests/test_ingest.py .......                                             [ 73%]
-tests/test_mailer.py ......                                              [ 86%]
-tests/test_pipeline.py ......                                            [100%]
+tests/test_admin_api.py ............                              [ 14%]
+tests/test_api_system.py ......                                    [ 21%]
+tests/test_auth.py .......                                         [ 30%]
+tests/test_classifier.py .......                                   [ 38%]
+tests/test_config.py ....                                          [ 43%]
+tests/test_conversation.py ..........                              [ 55%]
+tests/test_ingest.py .......                                       [ 64%]
+tests/test_mailer.py ......                                        [ 71%]
+tests/test_pipeline.py ............                                [ 85%]
+tests/test_replier.py .                                            [ 87%]
+tests/test_retention.py ..........                                 [100%]
 
-============================== 45 passed in 9.97s ==============================
+============================== 82 passed in 32.91s ==============================
 ```
 
 ## 阶段声明
 
-**Phase 1（里程碑 A）已完成；未实现 Phase 2 及以后的内容。** 请确认「待老板确认的问题」后，再进入 Phase 2。
+**Phase 2（里程碑 B）已完成；未实现 Phase 3 及以后的内容。**
+请确认上方「待老板确认的问题」后，再进入 Phase 3（高风险安抚 + 知识库 + 标准 QA）。

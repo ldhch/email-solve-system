@@ -33,8 +33,13 @@ class Settings(BaseSettings):
     # App
     app_name: str = "shouhou-agent"
     app_env: str = "development"
-    secret_key: str = ""  # Phase 2: JWT signing key
+    secret_key: str = ""  # JWT signing key (required from Phase 2)
     encryption_key: str = ""  # Phase 4: Fernet key
+
+    # Owner account (seeded by init-db / create-owner, Phase 2)
+    owner_username: str = "boss"
+    owner_password: str = ""
+    jwt_expire_seconds: int = 86400  # 24h session, no refresh (TECH 6.1)
 
     # Database (SQLite WAL only)
     database_url: str = ""
@@ -53,6 +58,8 @@ class Settings(BaseSettings):
     llm_provider: str = "deepseek"  # deepseek | openai | mock
     deepseek_api_key: str = ""
     openai_api_key: str = ""
+    llm_base_url: str = "https://api.deepseek.com"
+    openai_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "deepseek-v4-flash"
     llm_temperature: float = 0.3
     llm_max_tokens: int = 2048
@@ -70,6 +77,10 @@ class Settings(BaseSettings):
     compensation_max_usd: float = 10.0
     conversation_window_days: int = 7
     poll_interval_seconds: int = 90
+    # Optional return-handling instructions appended to "release" replies.
+    # Empty => the reply asks the customer for their order number first
+    # (no fabricated addresses/instructions, PRD edge case 11).
+    return_policy_text: str = ""
 
     # Phase-1 service guard for pause/resume endpoints
     agent_service_token: str = ""

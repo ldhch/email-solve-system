@@ -39,6 +39,7 @@ from app.services.classifier import Classification, ClassifierService, resolve_a
 from app.services.conversation import ConversationService
 from app.services.mailer import MailerService
 from app.services.replier import ReplierService
+from app.services.retention import RetentionService
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +251,7 @@ class IngestService:
         self.conversations = ConversationService(db, settings)
         self.classifier = ClassifierService(settings, self.llm_client)
         self.replier = ReplierService(db, settings, self.llm_client)
+        self.retention = RetentionService(db, settings, self.llm_client)
 
     # ---------- IMAP transport ----------
 
@@ -388,34 +390,27 @@ class IngestService:
                 category=classification.category,
             )
 
-        action = resolve_action(classification.risk_level, classification.category)
-        if action == "auto_send":
-            reply = self.replier.generate_and_send(
-                email_row=email_row,
-                conversation=conversation,
-                mailer=self.mailer,
-            )
-            self.db.commit()
-            sent = reply.status == "sent"
-            return ProcessingResult(
-                message_id=parsed.message_id,
-                action="auto_sent" if sent else "failed",
-                email_id=email_row.id,
-                conversation_id=conversation.id,
-                reply_id=reply.id,
-                risk_level=classification.risk_level,
-                category=classification.category,
-                error=reply.send_error if not sent else None,
-            )
+        # Phase 2 routing (TECH 九 Phase 2):
+        #   high / unknown  -> manual (reassurance + tickets remain Phase 3)
+        #   refund/return/exchange -> retention flow (M-13); chargeback was
+        #                             already forced to high by the classifier
+        #   medium           -> pending_review draft (boss approves first)
+        #   low              -> auto_send
+        if classification.risk_level in ("high", "unknown"):
+            return self._manual(parsed, email_row, conversation, classification)
 
-        # Phase 1 has no review queue / ticket table (Phase 2/3). Record and stop.
-        log_action(
-            self.db,
-            "requires_manual",
-            "email",
-            email_row.id,
-            actor_id=None,
-        )
+        if classification.category == "refund_request":
+            return self._run_retention_flow(parsed, email_row, conversation, classification)
+
+        action = resolve_action(classification.risk_level, classification.category)
+        if action == "review":
+            return self._draft_for_review(parsed, email_row, conversation, classification)
+        if action == "auto_send":
+            return self._auto_send(parsed, email_row, conversation, classification)
+        return self._manual(parsed, email_row, conversation, classification)
+
+    def _manual(self, parsed, email_row, conversation, classification) -> ProcessingResult:
+        log_action(self.db, "requires_manual", "email", email_row.id, actor_id=None)
         self.db.commit()
         return ProcessingResult(
             message_id=parsed.message_id,
@@ -424,6 +419,218 @@ class IngestService:
             conversation_id=conversation.id,
             risk_level=classification.risk_level,
             category=classification.category,
+        )
+
+    def _auto_send(
+        self,
+        parsed,
+        email_row,
+        conversation,
+        classification,
+        reply_type: str = "general",
+    ) -> ProcessingResult:
+        """Generate + SMTP-send a reply (low-risk or direct retention)."""
+
+        reply = self.replier.generate_and_send(
+            email_row=email_row,
+            conversation=conversation,
+            mailer=self.mailer,
+            reply_type=reply_type,
+            return_policy_text=self.settings.return_policy_text,
+        )
+        self.db.commit()
+        sent = reply.status == "sent"
+        return ProcessingResult(
+            message_id=parsed.message_id,
+            action="auto_sent" if sent else "failed",
+            email_id=email_row.id,
+            conversation_id=conversation.id,
+            reply_id=reply.id,
+            risk_level=classification.risk_level,
+            category=classification.category,
+            error=reply.send_error if not sent else None,
+        )
+
+    def _draft_for_review(
+        self, parsed, email_row, conversation, classification
+    ) -> ProcessingResult:
+        """Medium-risk (or unknown-reason refund): draft waiting for the boss."""
+
+        content_en = self.replier.generate(email_row, conversation)
+        reply = self.replier.build_reply(
+            email_row,
+            conversation,
+            content_en,
+            reply_type="general",
+            status="pending_review",
+        )
+        log_action(self.db, "requires_review", "reply", reply.id)
+        self.db.commit()
+        return ProcessingResult(
+            message_id=parsed.message_id,
+            action="review",
+            email_id=email_row.id,
+            conversation_id=conversation.id,
+            reply_id=reply.id,
+            risk_level=classification.risk_level,
+            category=classification.category,
+        )
+
+    def _run_retention_flow(
+        self, parsed, email_row, conversation, classification
+    ) -> ProcessingResult:
+        """M-13: route refund/return/exchange requests into save-the-sale."""
+
+        body = parsed.body_text or ""
+
+        # The customer is answering a retention offer we already sent.
+        if self.retention.has_open_offer(conversation.id):
+            if self.retention.is_customer_accepted(body):
+                reply = self.replier.generate_and_send(
+                    email_row=email_row,
+                    conversation=conversation,
+                    mailer=self.mailer,
+                    reply_type="retention_accepted",
+                )
+                self.db.commit()
+                log_action(
+                    self.db,
+                    "retention_accepted",
+                    "conversation",
+                    conversation.id,
+                )
+                return ProcessingResult(
+                    message_id=parsed.message_id,
+                    action="auto_sent" if reply.status == "sent" else "failed",
+                    email_id=email_row.id,
+                    conversation_id=conversation.id,
+                    reply_id=reply.id,
+                    risk_level=classification.risk_level,
+                    category=classification.category,
+                    error=reply.send_error if reply.status != "sent" else None,
+                )
+            # rejected/uncertain: the pending offer already counts toward the
+            # attempt limit, so the next round may already release the return.
+        elif self.retention.is_released(conversation.id):
+            # Return instructions were already sent; further refund requests go
+            # to the boss instead of spamming the same reply.
+            return self._manual(parsed, email_row, conversation, classification)
+
+        reason = self.retention.classify_reason(body)
+        strategy = self.retention.resolve_strategy(reason, conversation.retention_attempts)
+
+        if strategy == "none":  # quality / damaged: honor the return directly
+            reply = self.replier.generate_and_send(
+                email_row=email_row,
+                conversation=conversation,
+                mailer=self.mailer,
+                reply_type="retention_release",
+                return_policy_text=self.settings.return_policy_text,
+            )
+            self.db.commit()
+            log_action(self.db, "retention_released", "conversation", conversation.id)
+            return ProcessingResult(
+                message_id=parsed.message_id,
+                action="auto_sent" if reply.status == "sent" else "failed",
+                email_id=email_row.id,
+                conversation_id=conversation.id,
+                reply_id=reply.id,
+                risk_level=classification.risk_level,
+                category=classification.category,
+                error=reply.send_error if reply.status != "sent" else None,
+            )
+
+        if strategy == "review":  # unknown reason: conservative, boss reviews
+            return self._draft_for_review(parsed, email_row, conversation, classification)
+
+        if strategy == "exchange":  # size issue: AI sends the exchange offer
+            content_en = self.replier.generate(
+                email_row, conversation, reply_type="retention_exchange"
+            )
+            reply = self.replier.build_reply(
+                email_row,
+                conversation,
+                content_en,
+                reply_type="retention_exchange",
+                status="draft",
+            )
+            try:
+                self.mailer.send(
+                    reply, to_email=email_row.from_email, subject=email_row.subject
+                )
+            except SMTPError as exc:
+                reply.status = "failed"
+                reply.send_error = str(exc)
+                log_action(self.db, "reply_failed", "reply", reply.id)
+                self.db.commit()
+                return ProcessingResult(
+                    message_id=parsed.message_id,
+                    action="failed",
+                    email_id=email_row.id,
+                    conversation_id=conversation.id,
+                    reply_id=reply.id,
+                    risk_level=classification.risk_level,
+                    category=classification.category,
+                    error=str(exc),
+                )
+            reply.status = "sent"
+            reply.sent_at = utcnow()
+            conversation.retention_attempts += 1
+            log_action(self.db, "retention_offer_sent", "conversation", conversation.id)
+            self.db.commit()
+            return ProcessingResult(
+                message_id=parsed.message_id,
+                action="auto_sent",
+                email_id=email_row.id,
+                conversation_id=conversation.id,
+                reply_id=reply.id,
+                risk_level=classification.risk_level,
+                category=classification.category,
+            )
+
+        if strategy == "compensation":  # money involved: boss approves first
+            content_en = self.replier.generate(
+                email_row, conversation, reply_type="retention_compensation"
+            )
+            reply = self.replier.build_reply(
+                email_row,
+                conversation,
+                content_en,
+                reply_type="retention_compensation",
+                status="pending_review",
+            )
+            conversation.retention_attempts += 1
+            log_action(self.db, "retention_draft_created", "reply", reply.id)
+            self.db.commit()
+            return ProcessingResult(
+                message_id=parsed.message_id,
+                action="review",
+                email_id=email_row.id,
+                conversation_id=conversation.id,
+                reply_id=reply.id,
+                risk_level=classification.risk_level,
+                category=classification.category,
+            )
+
+        # strategy == "release": attempts exhausted, honor the return
+        reply = self.replier.generate_and_send(
+            email_row=email_row,
+            conversation=conversation,
+            mailer=self.mailer,
+            reply_type="retention_release",
+            return_policy_text=self.settings.return_policy_text,
+        )
+        self.db.commit()
+        log_action(self.db, "retention_released", "conversation", conversation.id)
+        return ProcessingResult(
+            message_id=parsed.message_id,
+            action="auto_sent" if reply.status == "sent" else "failed",
+            email_id=email_row.id,
+            conversation_id=conversation.id,
+            reply_id=reply.id,
+            risk_level=classification.risk_level,
+            category=classification.category,
+            error=reply.send_error if reply.status != "sent" else None,
         )
 
     def _resend_failed_reply(self, email_row: Email) -> ProcessingResult | None:
@@ -514,6 +721,7 @@ class IngestService:
             summary = {
                 "fetched": len(items),
                 "auto_sent": 0,
+                "review": 0,
                 "manual": 0,
                 "paused": 0,
                 "duplicate": 0,
@@ -521,13 +729,20 @@ class IngestService:
                 "failed": 0,
             }
             for uid, raw in items:
-                parsed = parse_email(raw, uid=uid)
+                try:
+                    parsed = parse_email(raw, uid=uid)
+                except Exception as exc:  # noqa: BLE001 - one malformed mail must not stall the inbox
+                    logger.exception("Failed to parse email uid=%s; marking seen and skipping", uid)
+                    log_action(self.db, "parse_failed", "email", 0, ip=None)
+                    self.mark_seen(conn, uid)
+                    summary["failed"] += 1
+                    continue
                 result = self.process_one(parsed)
                 if result.action in summary:
                     summary[result.action] += 1
                 # Persisted emails are marked SEEN so they are not re-fetched.
                 # Paused/failed emails stay UNSEEN and are processed after resume/retry.
-                if result.action in ("auto_sent", "manual", "silenced"):
+                if result.action in ("auto_sent", "review", "manual", "silenced"):
                     self.mark_seen(conn, uid)
             return summary
         finally:

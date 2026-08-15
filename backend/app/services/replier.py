@@ -1,13 +1,15 @@
-"""Reply generation + send orchestration (M-07, Phase 1 scope).
+"""Reply generation + send orchestration (M-07).
 
-Phase 1 injects the conversation history only; knowledge base / standard QA
-injection arrives in Phase 3. No fabricated facts are allowed in the prompt.
+Phase 2 adds typed replies for the retention flow (exchange / compensation /
+release / acceptance). Knowledge base / standard QA injection arrives in
+Phase 3. No fabricated facts are allowed in the prompt.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,6 +35,47 @@ small online store. Follow these rules strictly:
 - For a thank-you note, reply briefly and warmly.
 - Output only the final email body, no greetings/headers, no signature block.
 """
+
+RETURN_HANDLING_SYSTEM_PROMPT = """\
+You are a customer-support agent for a small online store. The customer asked
+to return/refund an item and we are honoring their request (no retention).
+Write a short English reply that:
+- Apologizes for the inconvenience.
+- Confirms we will process the return/refund as requested.
+- If return instructions are provided below, include them; otherwise ask the
+  customer to reply with their order number so we can arrange the return.
+- Never invents order numbers, addresses, refund amounts or policies.
+- Output only the email body; no greeting header or signature block.
+
+Return instructions:
+{return_policy}
+"""
+
+ACCEPTANCE_CONFIRMATION_SYSTEM_PROMPT = """\
+You are a customer-support agent for a small online store. The customer just
+accepted our retention alternative (exchange or compensation) instead of a
+return. Write a short warm English reply that:
+- Thanks them and confirms what happens next (the exchange / compensation is
+  being arranged).
+- Asks them to reply with any missing info (order number) if needed.
+- Never invents order numbers, dates or policies.
+- Output only the email body; no greeting header or signature block.
+"""
+
+
+def _load_prompt(name: str, fallback: str) -> str:
+    prompt_file = (
+        Path(__file__).resolve().parents[2] / "docs" / "prompts" / name
+    )
+    if prompt_file.exists():
+        return prompt_file.read_text(encoding="utf-8")
+    return fallback
+
+
+RETENTION_PROMPT_FILES = {
+    "retention_exchange": "retention_exchange.md",
+    "retention_compensation": "retention_compensation.md",
+}
 
 
 def new_outbound_message_id(settings: Settings) -> str:
@@ -88,29 +131,78 @@ class ReplierService:
         content = f"{history}\n{current_text}" if history else current_text
         return [{"role": "user", "content": content}]
 
-    def generate(self, email_row: Email, conversation: Conversation) -> str:
+    def generate(
+        self,
+        email_row: Email,
+        conversation: Conversation,
+        reply_type: str = "general",
+        return_policy_text: str = "",
+    ) -> str:
         messages = self._conversation_history(conversation, email_row)
+        if reply_type in RETENTION_PROMPT_FILES:
+            prompt = _load_prompt(RETENTION_PROMPT_FILES[reply_type], GENERATE_SYSTEM_PROMPT)
+        elif reply_type == "retention_release":
+            prompt = RETURN_HANDLING_SYSTEM_PROMPT.format(
+                return_policy=return_policy_text or "(none provided)"
+            )
+        elif reply_type == "retention_accepted":
+            prompt = ACCEPTANCE_CONFIRMATION_SYSTEM_PROMPT
+        else:
+            prompt = GENERATE_SYSTEM_PROMPT
         return self.llm_client.chat_with_retry(
             messages=messages,
-            system_prompt=GENERATE_SYSTEM_PROMPT,
+            system_prompt=prompt,
         ).strip()
 
-    def generate_and_send(self, email_row: Email, conversation: Conversation, mailer) -> Reply:
-        """Generate, persist a Reply row and send it. Failed sends stay persisted."""
+    def build_reply(
+        self,
+        email_row: Email,
+        conversation: Conversation,
+        content_en: str,
+        reply_type: str = "general",
+        status: str = "draft",
+        content_cn: str | None = None,
+    ) -> Reply:
+        """Persist a Reply row without sending it."""
 
-        content_en = self.generate(email_row, conversation)
         reply = Reply(
             conversation_id=conversation.id,
             email_id=email_row.id,
             message_id=new_outbound_message_id(self.settings),
             in_reply_to=email_row.message_id,
             content_en=content_en,
-            status="draft",
-            reply_type="general",
+            content_cn=content_cn,
+            status=status,
+            reply_type=reply_type,
             created_at=utcnow(),
         )
         self.db.add(reply)
         self.db.flush()
+        return reply
+
+    def generate_and_send(
+        self,
+        email_row: Email,
+        conversation: Conversation,
+        mailer,
+        reply_type: str = "general",
+        return_policy_text: str = "",
+    ) -> Reply:
+        """Generate, persist a Reply row and send it. Failed sends stay persisted."""
+
+        content_en = self.generate(
+            email_row,
+            conversation,
+            reply_type=reply_type,
+            return_policy_text=return_policy_text,
+        )
+        reply = self.build_reply(
+            email_row,
+            conversation,
+            content_en,
+            reply_type=reply_type,
+            status="draft",
+        )
 
         try:
             mailer.send(reply, to_email=email_row.from_email, subject=email_row.subject)

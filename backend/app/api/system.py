@@ -1,21 +1,20 @@
 """Emergency pause switch + health endpoints (M-19, F9).
 
-Phase 1 has no owner login (Phase 2), so pause/resume are guarded by the
-`X-Service-Token` header matching `AGENT_SERVICE_TOKEN`. Phase 2 replaces this
-guard with the JWT-based owner auth and adds the Settings-page UI.
+Phase 2: pause/resume are guarded by the JWT owner session (httpOnly cookie).
+`AGENT_SERVICE_TOKEN` remains reserved for AI-internal calls (TECH 6.2).
 """
 
 from __future__ import annotations
 
-import hmac
 import time
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.config import Settings, get_settings
+from app.api.auth import require_owner
 from app.db.session import get_db
+from app.models.user import User
 from app.models.system_state import SystemState
 from app.schemas.system import HealthzResponse, PauseRequest, SystemStatusResponse
 from app.services.audit import log_action, utcnow
@@ -23,29 +22,6 @@ from app.services.audit import log_action, utcnow
 router = APIRouter(prefix="/api/v1", tags=["system"])
 
 _STARTED_AT = time.time()
-
-
-async def get_settings_dependency() -> Settings:
-    """Async settings dependency (sync deps would run in a thread pool)."""
-
-    return get_settings()
-
-
-async def _require_service_token(
-    x_service_token: str | None = Header(default=None, alias="X-Service-Token"),
-    settings: Settings = Depends(get_settings_dependency),
-) -> None:
-    expected = settings.agent_service_token
-    if not expected:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="SERVICE_NOT_CONFIGURED",
-        )
-    if not x_service_token or not hmac.compare_digest(x_service_token, expected):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="UNAUTHORIZED",
-        )
 
 
 def _fmt(dt: datetime | None) -> str | None:
@@ -75,7 +51,7 @@ async def system_status(db: Session = Depends(get_db)) -> SystemStatusResponse:
 async def system_pause(
     payload: PauseRequest,
     request: Request,
-    _: None = Depends(_require_service_token),
+    user: User = Depends(require_owner),
     db: Session = Depends(get_db),
 ) -> SystemStatusResponse:
     state = db.get(SystemState, 1)
@@ -90,6 +66,7 @@ async def system_pause(
         "pause",
         "system",
         state.id,
+        actor_id=user.id,
         ip=request.client.host if request.client else None,
     )
     db.commit()
@@ -104,7 +81,7 @@ async def system_pause(
 @router.post("/system/resume", response_model=SystemStatusResponse)
 async def system_resume(
     request: Request,
-    _: None = Depends(_require_service_token),
+    user: User = Depends(require_owner),
     db: Session = Depends(get_db),
 ) -> SystemStatusResponse:
     state = db.get(SystemState, 1)
@@ -119,6 +96,7 @@ async def system_resume(
         "resume",
         "system",
         state.id,
+        actor_id=user.id,
         ip=request.client.host if request.client else None,
     )
     db.commit()

@@ -83,7 +83,7 @@ def test_parse_multipart_with_attachment(tmp_path) -> None:
 
 
 def test_process_one_duplicate_skipped(db, settings, fake_smtp_class) -> None:
-    raw = make_raw_email()
+    raw = make_raw_email(subject="Product size question")
     parsed = parse_email(raw, uid="1")
     service = IngestService(
         db,

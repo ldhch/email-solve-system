@@ -13,8 +13,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
+from app.core.security import hash_password
 from app.db.base import Base
 from app.models.system_state import SystemState
+from app.models.user import User
+from app.services.audit import utcnow
 
 
 def make_engine(database_url: str) -> Engine:
@@ -76,13 +79,33 @@ def ensure_data_dirs(settings: Settings | None = None) -> None:
 
 
 def seed(settings: Settings | None = None) -> None:
-    """Insert the single `system_state` row if missing (id must be 1)."""
+    """Insert the `system_state` singleton + owner user if missing.
+
+    The owner is created only when it does not exist yet; the stored hash is
+    never overwritten on restart so a password changed via `create-owner`
+    survives later `init-db` calls.
+    """
 
     factory = get_session_factory(settings)
     with factory() as db:
         if db.get(SystemState, 1) is None:
             db.add(SystemState(id=1, ai_paused=False))
-            db.commit()
+        if settings.owner_password:
+            from sqlalchemy import select
+
+            existing = db.execute(
+                select(User).where(User.username == settings.owner_username)
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(
+                    User(
+                        username=settings.owner_username,
+                        password_hash=hash_password(settings.owner_password),
+                        role="owner",
+                        created_at=utcnow(),
+                    )
+                )
+        db.commit()
 
 
 def init_db(settings: Settings | None = None) -> None:

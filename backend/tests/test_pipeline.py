@@ -89,7 +89,7 @@ def test_chargeback_email_not_auto_replied(db, settings, fake_smtp_class, fake_i
     assert db.execute(select(Reply)).scalars().all() == []
 
 
-def test_refund_request_not_auto_replied_in_phase1(
+def test_refund_size_goes_through_retention_exchange(
     db, settings, fake_smtp_class, fake_imap
 ) -> None:
     raw = make_raw_email(
@@ -99,10 +99,141 @@ def test_refund_request_not_auto_replied_in_phase1(
     )
     imap = fake_imap([("3", raw)])
     summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
-    assert summary["manual"] == 1
+    assert summary["auto_sent"] == 1
     email = db.execute(select(Email)).scalar_one()
     assert email.category == "refund_request"
-    assert db.execute(select(Reply)).scalars().all() == []
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.status == "sent"
+    assert reply.reply_type == "retention_exchange"
+    conversation = db.get(Conversation, email.conversation_id)
+    assert conversation.retention_attempts == 1
+
+
+def test_medium_consultation_draft_goes_to_review(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    raw = make_raw_email(
+        subject="Return policy",
+        body="Could you explain your return policy before I place an order?",
+        message_id="<e2e-medium@example.com>",
+    )
+    imap = fake_imap([("8", raw)])
+    summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
+
+    assert summary["review"] == 1
+    email = db.execute(select(Email)).scalar_one()
+    assert email.risk_level == "medium"
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.status == "pending_review"
+    assert reply.reply_type == "general"
+    assert FakeSMTP.instances == []  # nothing sent without approval
+
+
+def test_refund_compensation_draft_waits_for_owner(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    raw = make_raw_email(
+        subject="Refund",
+        body="I changed my mind and no longer want this item. Please refund me.",
+        message_id="<e2e-comp@example.com>",
+    )
+    imap = fake_imap([("4", raw)])
+    summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
+
+    assert summary["review"] == 1
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.status == "pending_review"
+    assert reply.reply_type == "retention_compensation"
+    conversation = db.get(Conversation, reply.conversation_id)
+    assert conversation.retention_attempts == 1
+    assert FakeSMTP.instances == []
+
+
+def test_refund_quality_handled_directly_no_retention(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    raw = make_raw_email(
+        subject="Defective",
+        body="The product I received is defective. I want my money back.",
+        message_id="<e2e-quality@example.com>",
+    )
+    imap = fake_imap([("5", raw)])
+    summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
+
+    assert summary["auto_sent"] == 1
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.reply_type == "retention_release"
+    assert reply.status == "sent"
+    conversation = db.get(Conversation, reply.conversation_id)
+    assert conversation.retention_attempts == 0  # quality: no retention attempt
+
+
+def test_customer_accepts_exchange_offer(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    first = make_raw_email(
+        subject="Return request",
+        body="The shirt is too small. I want to return it.",
+        message_id="<ret-1@example.com>",
+    )
+    imap = fake_imap([("10", first)])
+    service = _service(db, settings, imap, FakeSMTP)
+    first_summary = service.fetch_and_process()
+    assert first_summary["auto_sent"] == 1
+
+    second = make_raw_email(
+        subject="Re: Return request",
+        body="OK, send the replacement, that works for me.",
+        message_id="<ret-2@example.com>",
+        in_reply_to="<ret-1@example.com>",
+    )
+    imap2 = fake_imap([("11", second)])
+    service2 = _service(db, settings, imap2, FakeSMTP)
+    second_summary = service2.fetch_and_process()
+
+    assert second_summary["auto_sent"] == 1
+    replies = db.execute(select(Reply)).scalars().all()
+    assert [r.reply_type for r in replies] == ["retention_exchange", "retention_accepted"]
+    actions = {a.action for a in db.execute(select(AuditLog)).scalars().all()}
+    assert "retention_accepted" in actions
+
+
+def test_retention_attempt_limit_releases_return(
+    db, settings, fake_smtp_class, fake_imap, session_factory
+) -> None:
+    raw = make_raw_email(
+        subject="Still want to return",
+        body="I still want to return the shirt, it does not fit.",
+        message_id="<e2e-release@example.com>",
+    )
+    imap = fake_imap([("6", raw)])
+    service = _service(db, settings, imap, FakeSMTP)
+    # Simulate two retention offers already sent on this conversation: the
+    # third refund request must stop retaining and honor the return.
+    from app.models.customer import Customer
+    from app.services.audit import utcnow
+
+    with session_factory() as db3:
+        customer = Customer(email="customer@example.com", created_at=utcnow())
+        db3.add(customer)
+        db3.flush()
+        conv = Conversation(
+            customer_id=customer.id,
+            subject_normalized="still want to return",
+            window_end=utcnow(),
+            last_activity_at=utcnow(),
+            status="open",
+            retention_attempts=2,
+        )
+        db3.add(conv)
+        db3.commit()
+
+    summary = service.fetch_and_process()
+    assert summary["auto_sent"] == 1
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.reply_type == "retention_release"
+    conversation = db.get(Conversation, reply.conversation_id)
+    assert conversation.retention_attempts == 2  # unchanged: released, no new offer
 
 
 def test_generation_failure_rolls_back_and_can_retry(
@@ -166,7 +297,9 @@ def test_send_failure_marks_reply_failed_and_keeps_email_unseen(
     db, settings, fake_imap
 ) -> None:
     FakeSMTP.reset(fail_remaining=99)
-    raw = make_raw_email(message_id="<fail-1@example.com>")
+    raw = make_raw_email(
+        subject="Product size question", message_id="<fail-1@example.com>"
+    )
     imap = fake_imap([("5", raw)])
     summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
 
@@ -181,7 +314,9 @@ def test_failed_reply_is_resent_without_regeneration(
     db, settings, fake_imap
 ) -> None:
     FakeSMTP.reset(fail_remaining=99)
-    raw = make_raw_email(message_id="<resend-1@example.com>")
+    raw = make_raw_email(
+        subject="Product size question", message_id="<resend-1@example.com>"
+    )
     imap = fake_imap([("4", raw)])
     service = _service(db, settings, imap, FakeSMTP)
 
@@ -206,7 +341,9 @@ def test_failed_reply_is_resent_without_regeneration(
 
 
 def test_duplicate_uid_second_cycle_skipped(db, settings, fake_smtp_class, fake_imap) -> None:
-    raw = make_raw_email(message_id="<dup-1@example.com>")
+    raw = make_raw_email(
+        subject="Product size question", message_id="<dup-1@example.com>"
+    )
     imap = fake_imap([("2", raw)])
     service = _service(db, settings, imap, FakeSMTP)
     first = service.fetch_and_process()
