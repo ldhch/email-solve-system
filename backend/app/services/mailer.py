@@ -45,12 +45,35 @@ def build_message(reply, to_email: str, subject: str, settings: Settings) -> Ema
     return msg
 
 
+def build_text_message(
+    to_email: str,
+    subject: str,
+    body: str,
+    settings: Settings,
+    message_id: str | None = None,
+) -> EmailMessage:
+    """Compose a plain-text message (used by alert emails, M-18)."""
+
+    msg = EmailMessage()
+    from_addr = settings.email_username
+    if settings.mail_from_name:
+        msg["From"] = f"{settings.mail_from_name} <{from_addr}>"
+    else:
+        msg["From"] = from_addr
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    if message_id:
+        msg["Message-ID"] = message_id
+    msg.set_content(body)
+    return msg
+
+
 class MailerService:
     """Sends Reply rows through SMTP; retries 3x (PRD F10)."""
 
     def __init__(
         self,
-        db: Session,
+        db: Session | None,
         settings: Settings,
         smtp_class: type | None = None,
     ) -> None:
@@ -108,3 +131,30 @@ class MailerService:
                 if attempt < 3:
                     time.sleep(min(2 ** (attempt - 1), 4))
         raise SMTPError(f"SMTP send failed after 3 attempts: {last_error}") from last_error
+
+    def send_text(
+        self,
+        to_email: str,
+        subject: str,
+        body: str,
+        message_id: str | None = None,
+    ) -> None:
+        """Send a plain-text message (alerts) with the same 3-attempt retry.
+
+        Alert mail is intentionally not counted by the outbound reply rate
+        limiter: the limiter protects customer-facing sends, while alerts must
+        always get through.
+        """
+
+        msg = build_text_message(to_email, subject, body, self.settings, message_id)
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                self._send_once(msg)
+                return
+            except Exception as exc:  # noqa: BLE001 - smtplib raises many types
+                last_error = exc
+                logger.warning("Alert SMTP send failed (attempt %s/3): %s", attempt, exc)
+                if attempt < 3:
+                    time.sleep(min(2 ** (attempt - 1), 4))
+        raise SMTPError(f"Alert SMTP send failed after 3 attempts: {last_error}") from last_error

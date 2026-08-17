@@ -16,6 +16,7 @@ from app.db.session import get_db
 from app.llm.client import build_llm_client
 from app.models.attachment import Attachment
 from app.models.conversation import Conversation
+from app.models.customer import Customer
 from app.models.email import Email
 from app.models.reply import Reply
 from app.models.ticket import Ticket
@@ -56,6 +57,26 @@ def _conversation_status(conv: Conversation) -> str:
     if any(t.status in ("pending", "in_progress") for t in tickets):
         return "escalated"
     return "open"
+
+
+def _has_newer_release(db: Session, reply: Reply) -> bool:
+    """True when an auto-release was already sent after this draft.
+
+    Guards against double-sending a compensation offer after the scheduler
+    auto-released the return (PRD edge case 22 / review finding).
+    """
+
+    return (
+        db.execute(
+            select(Reply).where(
+                Reply.conversation_id == reply.conversation_id,
+                Reply.reply_type == "retention_release",
+                Reply.status == "sent",
+                Reply.created_at > reply.created_at,
+            )
+        ).scalars().first()
+        is not None
+    )
 
 
 def _recompute_risk(db: Session, conv: Conversation) -> None:
@@ -137,6 +158,25 @@ async def conversation_detail(
     open_tickets = [t for t in conv.tickets if not t.is_deleted and t.status != "resolved"]
     sla_deadline = max((t.sla_deadline for t in open_tickets), default=None)
 
+    # PRD edge case 15: same display name on a different address is surfaced as
+    # a "possible same customer" hint; the boss decides whether to merge.
+    suggested_merge_conversation_id = None
+    if conv.customer.display_name:
+        twins = db.execute(
+            select(Customer.id).where(
+                Customer.display_name == conv.customer.display_name,
+                Customer.id != conv.customer_id,
+            )
+        ).scalars().all()
+        if twins:
+            other = db.execute(
+                select(Conversation)
+                .where(Conversation.customer_id.in_(twins))
+                .order_by(Conversation.last_activity_at.desc())
+            ).scalars().first()
+            if other is not None:
+                suggested_merge_conversation_id = other.id
+
     return ok(
         {
             "id": conv.id,
@@ -148,7 +188,7 @@ async def conversation_detail(
             "status": _conversation_status(conv),
             "risk_level": conv.risk_level,
             "retention_attempts": conv.retention_attempts,
-            "suggested_merge_conversation_id": None,
+            "suggested_merge_conversation_id": suggested_merge_conversation_id,
             "sla_deadline": _fmt(sla_deadline),
             "timeline": timeline,
         }
@@ -245,6 +285,8 @@ async def approve_reply(
         raise HTTPException(status_code=404, detail="NOT_FOUND")
     if reply.status != "pending_review":
         raise HTTPException(status_code=409, detail="NOT_REVIEWABLE")
+    if _has_newer_release(db, reply):
+        raise HTTPException(status_code=409, detail="SUPERSEDED")
     email = db.get(Email, reply.email_id)
     if email is None:
         raise HTTPException(status_code=409, detail="NOT_REVIEWABLE")
@@ -372,6 +414,8 @@ async def send_draft(
         raise HTTPException(status_code=404, detail="NOT_FOUND")
     if reply.status != "draft":
         raise HTTPException(status_code=409, detail="NOT_EDITABLE")
+    if _has_newer_release(db, reply):
+        raise HTTPException(status_code=409, detail="SUPERSEDED")
     if not reply.content_en and reply.content_cn:
         try:
             reply.content_en = TranslatorService(
@@ -586,6 +630,8 @@ async def merge_conversations(
         e.conversation = conv
     for r in list(other.replies):
         r.conversation = conv
+    for t in list(other.tickets):
+        t.conversation = conv
     db.flush()
     conv.window_end = max(conv.window_end, other.window_end)
     conv.last_activity_at = max(conv.last_activity_at, other.last_activity_at)

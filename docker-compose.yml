@@ -1,0 +1,61 @@
+# shouhou-agent single-machine deployment (Phase 4 M-24).
+# Red lines respected: single VPS, Docker Compose only (no K8s/Swarm),
+# SQLite persisted on the appdata volume, no queue/worker services.
+services:
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      # Absolute in-container paths: the appdata volume is mounted at /app/data,
+      # so SQLite/attachments/secrets.bin all persist across container rebuilds.
+      DATA_DIR: /app/data
+      DATABASE_URL: sqlite:////app/data/app.db
+      ATTACHMENT_DIR: /app/data/attachments
+    volumes:
+      - appdata:/app/data
+    restart: always
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/healthz', timeout=3)",
+        ]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - backend
+    restart: always
+    volumes:
+      - certs:/etc/letsencrypt:ro
+      - webroot:/var/www/certbot
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/api/v1/healthz"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # Optional HTTPS certificate management (Let's Encrypt). Starts only with:
+  #   docker compose --profile https up -d
+  certbot:
+    image: certbot/certbot
+    profiles: ["https"]
+    volumes:
+      - certs:/etc/letsencrypt
+      - webroot:/var/www/certbot
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'
+
+volumes:
+  appdata:
+  certs:
+  webroot:

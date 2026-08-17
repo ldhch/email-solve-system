@@ -377,6 +377,77 @@ def test_split_and_merge_conversations(settings, session_factory) -> None:
         close_client(client)
 
 
+def test_merge_moves_tickets_to_target_conversation(
+    settings, session_factory
+) -> None:
+    """Phase 3: merging a conversation that owns a Ticket must not 500."""
+
+    with session_factory() as db:
+        customer = Customer(
+            email="merge-ticket@example.com", display_name="Merge", created_at=utcnow()
+        )
+        db.add(customer)
+        db.flush()
+        conv_a = Conversation(
+            customer_id=customer.id,
+            subject_normalized="thread a",
+            window_end=utcnow(),
+            last_activity_at=utcnow(),
+            status="open",
+        )
+        conv_b = Conversation(
+            customer_id=customer.id,
+            subject_normalized="thread b",
+            window_end=utcnow(),
+            last_activity_at=utcnow(),
+            status="open",
+        )
+        db.add_all([conv_a, conv_b])
+        db.flush()
+        for conv in (conv_a, conv_b):
+            db.add(
+                Email(
+                    conversation_id=conv.id,
+                    message_id=f"<merge-ticket-{conv.id}@example.com>",
+                    subject="Order question",
+                    from_email="merge-ticket@example.com",
+                    to_email="bot@example.com",
+                    body_text="body",
+                    is_inbound=True,
+                    received_at=utcnow(),
+                )
+            )
+        db.flush()
+        ticket = Ticket(
+            conversation_id=conv_b.id,
+            summary_cn="高风险工单",
+            risk_level="high",
+            status="pending",
+            sla_deadline=utcnow(),
+            created_at=utcnow(),
+        )
+        db.add(ticket)
+        db.commit()
+        target_id, other_id, ticket_id = conv_a.id, conv_b.id, ticket.id
+
+    client = _authed_client(settings, session_factory)
+    try:
+        resp = api(
+            client,
+            "POST",
+            f"/api/v1/conversations/{target_id}/merge",
+            json={"other_conversation_id": other_id},
+        )
+        assert resp.status_code == 200, resp.text
+        with session_factory() as db:
+            moved = db.get(Ticket, ticket_id)
+            assert moved is not None
+            assert moved.conversation_id == target_id
+            assert db.get(Conversation, other_id) is None
+    finally:
+        close_client(client)
+
+
 def test_attachment_download(settings, session_factory, tmp_path) -> None:
     settings = settings.model_copy(update={"attachment_dir": str(tmp_path)})
     attach_dir = tmp_path

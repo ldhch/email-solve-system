@@ -9,24 +9,35 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.audit import router as audit_router
 from app.api.auth import router as auth_router
 from app.api.conversations import router as conversations_router
 from app.api.inbox import router as inbox_router
+from app.api.kb import router as kb_router
+from app.api.qa import router as qa_router
 from app.api.system import router as system_router
 from app.api.tickets import router as tickets_router
 from app.config import get_settings
 from app.core.logging import setup_logging
 from app.db.session import init_db
+from app.services.scheduler import SchedulerService, set_scheduler_service
 
 setup_logging()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Create tables + seed on startup (create_all, no migrations)."""
+    """Create tables + seed, then start the APScheduler (Phase 4, M-12)."""
 
     init_db()
-    yield
+    scheduler = SchedulerService(get_settings())
+    scheduler.start()
+    set_scheduler_service(scheduler)
+    try:
+        yield
+    finally:
+        scheduler.shutdown()
+        set_scheduler_service(None)
 
 
 def create_app() -> FastAPI:
@@ -34,15 +45,18 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version="0.1.0",
-        description="After-sales email auto-reply backend (Phase 2)",
+        description="After-sales email auto-reply backend (Phase 4 - MVP)",
         lifespan=lifespan,
     )
     for router in (
         system_router,
         auth_router,
+        audit_router,
         inbox_router,
         conversations_router,
         tickets_router,
+        kb_router,
+        qa_router,
     ):
         app.include_router(router)
 
@@ -60,7 +74,7 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def root() -> dict:
-        return {"app": settings.app_name, "phase": 2, "status": "ok"}
+        return {"app": settings.app_name, "phase": 4, "status": "ok"}
 
     return app
 

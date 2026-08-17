@@ -16,12 +16,11 @@ from __future__ import annotations
 import json
 import logging
 import re
-from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import Settings
+from app.config import Settings, prompts_dir
 from app.core.exceptions import LLMError
 from app.llm.client import BaseLLMClient
 from app.models.reply import Reply
@@ -140,9 +139,7 @@ RETENTION_RELEASE_TYPES = {"retention_release", "retention_accepted"}
 
 
 def _load_acceptance_prompt() -> str:
-    prompt_file = (
-        Path(__file__).resolve().parents[2] / "docs" / "prompts" / "retention_acceptance.md"
-    )
+    prompt_file = prompts_dir() / "retention_acceptance.md"
     if prompt_file.exists():
         return prompt_file.read_text(encoding="utf-8")
     return ACCEPTANCE_SYSTEM_PROMPT

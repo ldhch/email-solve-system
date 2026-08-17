@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from sqlalchemy import select
 
 from app.core.exceptions import LLMError
@@ -11,6 +13,7 @@ from app.models.conversation import Conversation
 from app.models.email import Email
 from app.models.reply import Reply
 from app.models.system_state import SystemState
+from app.models.ticket import Ticket
 from app.services.ingest import IngestService
 from app.services.mailer import MailerService
 
@@ -24,6 +27,19 @@ class FailingGenerationLLM(MockLLMClient):
         if "classify" in (system_prompt or "").lower():
             return super().chat(messages, system_prompt, max_tokens, temperature)
         raise LLMError("simulated generation failure")
+
+
+class ScriptedLLM(MockLLMClient):
+    """Returns a fixed classification JSON for the triage prompt only."""
+
+    def __init__(self, settings, classification_json: str) -> None:
+        super().__init__(settings)
+        self.classification_json = classification_json
+
+    def chat(self, messages, system_prompt=None, max_tokens=None, temperature=None) -> str:
+        if "risk_level" in (system_prompt or "").lower():
+            return self.classification_json
+        return super().chat(messages, system_prompt, max_tokens, temperature)
 
 
 def _service(db, settings, imap, smtp_class=None) -> IngestService:
@@ -72,7 +88,7 @@ def test_low_risk_auto_reply_end_to_end(
     assert {"classified", "reply_sent"} <= actions
 
 
-def test_chargeback_email_not_auto_replied(db, settings, fake_smtp_class, fake_imap) -> None:
+def test_chargeback_gets_reassurance_and_ticket(db, settings, fake_smtp_class, fake_imap) -> None:
     raw = make_raw_email(
         subject="I am filing a dispute",
         body="I will file a chargeback with my bank if you don't refund me today.",
@@ -81,12 +97,78 @@ def test_chargeback_email_not_auto_replied(db, settings, fake_smtp_class, fake_i
     imap = fake_imap([("7", raw)])
     summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
 
-    assert summary["manual"] == 1
+    assert summary["reassured"] == 1
     email = db.execute(select(Email)).scalar_one()
     assert email.risk_level == "high"
     conversation = db.get(Conversation, email.conversation_id)
     assert conversation.risk_level == "high"
+
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.reply_type == "reassurance"
+    assert reply.status == "sent"
+    assert "24 hours" in reply.content_en
+    assert FakeSMTP.instances and FakeSMTP.instances[0].sent
+
+    ticket = db.execute(select(Ticket)).scalar_one()
+    assert ticket.status == "pending"
+    assert ticket.risk_level == "high"
+    assert ticket.summary_cn == email.summary_cn
+    assert ticket.sla_deadline == email.received_at + timedelta(hours=24)
+
+    actions = {a.action for a in db.execute(select(AuditLog)).scalars().all()}
+    assert {"reply_sent", "ticket_created"} <= actions
+
+
+def test_high_risk_smtp_failure_keeps_email_unseen_but_creates_ticket(
+    db, settings, fake_imap
+) -> None:
+    FakeSMTP.reset(fail_remaining=99)
+    raw = make_raw_email(
+        subject="Dispute",
+        body="I will file a dispute with my credit card company.",
+        message_id="<e2e-highfail@example.com>",
+    )
+    imap = fake_imap([("12", raw)])
+    summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
+
+    assert summary["failed"] == 1
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.reply_type == "reassurance"
+    assert reply.status == "failed"
+    assert reply.send_error
+    # Ticket creation is never blocked by the failed send.
+    ticket = db.execute(select(Ticket)).scalar_one()
+    assert ticket.status == "pending"
+    assert imap.seen == []  # retry the same draft next poll, no duplicate ticket
+
+
+def test_unknown_risk_manual_no_reassurance_no_ticket(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    raw = make_raw_email(
+        subject="Confusing mail",
+        body="hjkl weird message without clear intent",
+        message_id="<e2e-unknown@example.com>",
+    )
+    imap = fake_imap([("13", raw)])
+    service = IngestService(
+        db,
+        settings,
+        llm_client=ScriptedLLM(
+            settings,
+            '{"risk_level":"low","confidence":0.3,"category":"other",'
+            '"chargeback_risk":false,"summary_cn":"低置信度转人工"}',
+        ),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    summary = service.fetch_and_process()
+
+    assert summary["manual"] == 1
+    email = db.execute(select(Email)).scalar_one()
+    assert email.risk_level == "unknown"
     assert db.execute(select(Reply)).scalars().all() == []
+    assert db.execute(select(Ticket)).scalars().all() == []
 
 
 def test_refund_size_goes_through_retention_exchange(
@@ -109,7 +191,7 @@ def test_refund_size_goes_through_retention_exchange(
     assert conversation.retention_attempts == 1
 
 
-def test_medium_consultation_draft_goes_to_review(
+def test_policy_consultation_auto_sends_after_boss_decision(
     db, settings, fake_smtp_class, fake_imap
 ) -> None:
     raw = make_raw_email(
@@ -120,12 +202,41 @@ def test_medium_consultation_draft_goes_to_review(
     imap = fake_imap([("8", raw)])
     summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
 
-    assert summary["review"] == 1
+    assert summary["auto_sent"] == 1
     email = db.execute(select(Email)).scalar_one()
-    assert email.risk_level == "medium"
+    # Mock now mirrors the real classifier: policy consult is low risk.
+    assert email.risk_level == "low"
+    assert email.category == "policy"
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.status == "sent"
+    assert reply.reply_type == "general"
+
+
+def test_medium_other_still_goes_to_review(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    raw = make_raw_email(
+        subject="Mixed question",
+        body="I have a mixed question that is not a simple consultation.",
+        message_id="<e2e-other-medium@example.com>",
+    )
+    imap = fake_imap([("14", raw)])
+    service = IngestService(
+        db,
+        settings,
+        llm_client=ScriptedLLM(
+            settings,
+            '{"risk_level":"medium","confidence":0.9,"category":"other",'
+            '"chargeback_risk":false,"summary_cn":"其他咨询进待审核"}',
+        ),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    summary = service.fetch_and_process()
+
+    assert summary["review"] == 1
     reply = db.execute(select(Reply)).scalar_one()
     assert reply.status == "pending_review"
-    assert reply.reply_type == "general"
     assert FakeSMTP.instances == []  # nothing sent without approval
 
 

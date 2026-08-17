@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from typing import Any
 
 from app.config import Settings
 from app.core.exceptions import ConfigurationError, LLMError
+from app.services.alerting import record_llm_failure, record_llm_success
 
 logger = logging.getLogger(__name__)
 
@@ -58,15 +60,18 @@ class BaseLLMClient(ABC):
         last_error: Exception | None = None
         for attempt in range(retries + 1):
             try:
-                return self.chat(
+                result = self.chat(
                     messages=messages,
                     system_prompt=system_prompt,
                     max_tokens=max_tokens,
                     temperature=temperature,
                 )
+                record_llm_success()
+                return result
             except Exception as exc:  # noqa: BLE001 - retry covers all provider errors
                 last_error = exc
                 logger.warning("LLM call failed (attempt %s/%s): %s", attempt + 1, retries + 1, exc)
+                record_llm_failure(self.settings, error=str(exc))
                 if attempt < retries:
                     time.sleep(min(2 ** attempt, 8))
         raise LLMError(f"LLM call failed after {retries + 1} attempt(s): {last_error}") from last_error
@@ -134,7 +139,10 @@ class MockLLMClient(BaseLLMClient):
         lower = user_text.lower()
         system_prompt_lower = (system_prompt or "").lower()
         if "risk_level" in system_prompt_lower:  # triage classifier
-            if any(word in lower for word in ("chargeback", "dispute", "sue", "lawyer")):
+            if any(
+                re.search(rf"\b{re.escape(word)}\b", lower)
+                for word in ("chargeback", "dispute", "sue", "lawyer")
+            ):
                 return json.dumps(
                     {
                         "risk_level": "high",
@@ -147,7 +155,7 @@ class MockLLMClient(BaseLLMClient):
             if "return policy" in lower:
                 return json.dumps(
                     {
-                        "risk_level": "medium",
+                        "risk_level": "low",
                         "confidence": 0.85,
                         "category": "policy",
                         "chargeback_risk": False,
@@ -157,7 +165,7 @@ class MockLLMClient(BaseLLMClient):
             if "warranty" in lower:
                 return json.dumps(
                     {
-                        "risk_level": "medium",
+                        "risk_level": "low",
                         "confidence": 0.85,
                         "category": "warranty",
                         "chargeback_risk": False,
@@ -235,6 +243,11 @@ class MockLLMClient(BaseLLMClient):
             return json.dumps({"reason": "other"})
         if "translate" in system_prompt_lower:  # Chinese -> English translation
             return f"(Mock translation) {user_text}"
+        if "24 hours" in system_prompt_lower:  # high-risk reassurance (Phase 3)
+            return (
+                "Thank you for contacting us. We are sorry for the frustration. "
+                "A dedicated support agent will reply within 24 hours."
+            )
         return (
             "Thank you for reaching out to us. (Mock reply - replace LLM_PROVIDER=deepseek "
             "with a real API key for production.)"

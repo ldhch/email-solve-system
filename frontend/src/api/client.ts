@@ -49,6 +49,12 @@ export function errorText(err: unknown): string {
       return "该回复当前不可编辑";
     case "TOO_LONG":
       return "内容过长（最多 5000 字）";
+    case "UNSUPPORTED_TYPE":
+      return "不支持的文件类型（仅 PDF / DOCX / MD）";
+    case "TOO_LARGE":
+      return "文件超过 20MB 上限";
+    case "EMPTY_CONTENT":
+      return "未能从文件中提取到文本";
     default:
       return "操作失败，请重试";
   }

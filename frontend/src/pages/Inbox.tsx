@@ -20,6 +20,7 @@ const STATUS_LABEL: Record<string, string> = {
   draft: "草稿",
   sent: "已发送",
   failed: "发送失败",
+  superseded: "已自动放行",
 };
 
 export default function Inbox() {

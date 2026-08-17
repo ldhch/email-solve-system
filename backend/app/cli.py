@@ -10,6 +10,7 @@ Usage (from backend/):
     python -m app.cli create-owner --username boss --password '...'
     python -m app.cli simulate --risk low --dry-run
     python -m app.cli simulate --reason size --dry-run
+    python -m app.cli encrypt-secrets            # Fernet-encrypt sensitive .env fields
 """
 
 from __future__ import annotations
@@ -18,10 +19,16 @@ import argparse
 import logging
 import sys
 import time
+from pathlib import Path
 
 from app.config import get_settings
 from app.core.logging import get_logger
-from app.core.security import hash_password
+from app.core.security import (
+    SECRET_FIELDS,
+    default_secrets_file,
+    hash_password,
+    write_secrets_file,
+)
 from app.db.session import get_session_factory, init_db
 from app.llm.client import MockLLMClient
 from app.models.system_state import SystemState
@@ -150,6 +157,34 @@ def cmd_create_owner(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_encrypt_secrets(args: argparse.Namespace) -> int:
+    """Encrypt sensitive `.env` fields into `data/secrets.bin` (M-20).
+
+    Plaintext values are intentionally kept in `.env` as a fallback; the
+    README documents how to remove them in production after verification.
+    """
+
+    settings = get_settings()
+    if not settings.encryption_key:
+        print(
+            "ENCRYPTION_KEY is not set in .env. Generate one with:\n"
+            '  python -c "from cryptography.fernet import Fernet; '
+            'print(Fernet.generate_key().decode())"',
+            file=sys.stderr,
+        )
+        return 1
+    values = {field: getattr(settings, field, "") for field in SECRET_FIELDS}
+    present = {field: value for field, value in values.items() if value}
+    path = Path(args.file) if args.file else default_secrets_file(settings)
+    target = write_secrets_file(present, settings.encryption_key, path)
+    print(f"Encrypted {len(present)} field(s) -> {target}")
+    print(
+        "Plaintext values remain in .env as fallback. In production you may "
+        "remove them from .env after verifying runtime decryption."
+    )
+    return 0
+
+
 def cmd_simulate(args: argparse.Namespace) -> int:
     """Offline demo: inject a synthetic email and run the pipeline.
 
@@ -184,8 +219,10 @@ def cmd_simulate(args: argparse.Namespace) -> int:
             body = "This product is defective and I will file a chargeback with my bank if you don't fix it."
             subject = "Dispute"
         elif args.risk == "medium":
-            body = "Could you explain your return policy before I place an order?"
-            subject = "Return policy question"
+            # Pure consultations auto-send since the boss decision (方案 A);
+            # invoice/logistics/order changes still route to manual handling.
+            body = "Could you send me the invoice for my recent order?"
+            subject = "Invoice request"
         else:
             body = "Hi, what is the size of the XL t-shirt in centimeters? Thanks!"
             subject = "Product size question"
@@ -251,6 +288,14 @@ def build_parser() -> argparse.ArgumentParser:
     owner.add_argument("--username", default=None, help="default: OWNER_USERNAME from .env")
     owner.add_argument("--password", required=True, help="new owner password")
     owner.set_defaults(func=cmd_create_owner)
+
+    encrypt = sub.add_parser("encrypt-secrets", help="Fernet-encrypt sensitive .env fields")
+    encrypt.add_argument(
+        "--file",
+        default=None,
+        help="output path (default: data/secrets.bin)",
+    )
+    encrypt.set_defaults(func=cmd_encrypt_secrets)
 
     return parser
 

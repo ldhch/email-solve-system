@@ -11,9 +11,8 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
-from app.config import Settings
+from app.config import Settings, prompts_dir
 from app.core.exceptions import LLMError
 from app.llm.client import BaseLLMClient
 
@@ -48,6 +47,28 @@ DEFAULT_CHARGEBACK_KEYWORDS = [
     "platform complaint",
 ]
 
+# PRD edge case 9: the customer asks not to be contacted again. When detected,
+# the customer is silenced for 72h (no auto-replies, mail still ingested).
+SILENCE_KEYWORDS = [
+    "do not contact",
+    "do not reply",
+    "don't reply",
+    "don't contact",
+    "do not email",
+    "don't email",
+    "stop emailing",
+    "stop contacting",
+    "stop sending",
+    "never email",
+    "no more emails",
+    "take me off",
+    "remove me from your list",
+    "opt out",
+    "unsubscribe",
+    "不要再回复",
+    "不要联系",
+]
+
 CLASSIFY_SYSTEM_PROMPT = """\
 You are the triage classifier of an English after-sales support inbox.
 Read the customer email and return ONE strict JSON object with exactly these keys:
@@ -71,10 +92,17 @@ Rules:
 """
 
 
+def requests_silence(text: str | None) -> bool:
+    """True when the customer explicitly asks to stop receiving emails."""
+
+    lowered = (text or "").lower()
+    return any(keyword in lowered for keyword in SILENCE_KEYWORDS)
+
+
 def _load_prompt() -> str:
     """Load the classify prompt from docs/prompts when present."""
 
-    prompt_file = Path(__file__).resolve().parents[2] / "docs" / "prompts" / "classify_chargeback.md"
+    prompt_file = prompts_dir() / "classify_chargeback.md"
     if prompt_file.exists():
         return prompt_file.read_text(encoding="utf-8")
     return CLASSIFY_SYSTEM_PROMPT
@@ -96,6 +124,10 @@ RISK_ACTIONS = {
     "medium:logistics_inquiry": "escalate",
     "medium:order_modification": "escalate",
     "medium:invoice": "escalate",
+    "medium:policy": "auto_send",
+    "medium:warranty": "auto_send",
+    "medium:product_spec": "auto_send",
+    "medium:usage": "auto_send",
 }
 
 # Refund/return/exchange must never auto-send in Phase 1: the retention flow
@@ -150,10 +182,26 @@ class ClassifierService:
     def classify(self, parsed_email) -> Classification:
         """Return the classification for one parsed email."""
 
+        body_text = (parsed_email.body_text or parsed_email.body_html or "").strip()
+        if not body_text:
+            # PRD edge case 6: empty / image-only / unreadable emails must go to
+            # the manual queue, never auto-reply.
+            logger.info(
+                "Email %s has no extractable text; routing to manual",
+                parsed_email.message_id,
+            )
+            return Classification(
+                risk_level="unknown",
+                confidence=0.0,
+                category="other",
+                chargeback_risk=False,
+                summary_cn="邮件内容为空或无法提取文本，已标记可疑待人工核查",
+            )
+
         user_content = (
             f"Subject: {parsed_email.subject}\n"
             f"From: {parsed_email.from_email}\n"
-            f"Body:\n{parsed_email.body_text or parsed_email.body_html or ''}"
+            f"Body:\n{body_text}"
         )
         raw = self.llm_client.chat_with_retry(
             messages=[{"role": "user", "content": user_content}],

@@ -21,11 +21,15 @@ def settings() -> Settings:
         llm_provider="mock",
         email_username="bot@example.com",
         email_password="test-password",
+        deepseek_api_key="",
+        openai_api_key="",
+        encryption_key="",
         secret_key="test-secret-key-for-jwt-0123456789abcdef0123456789",
         owner_username="boss",
         owner_password="test-owner-password",
         agent_service_token="test-token",
         smtp_rate_limit_per_hour=0,
+        compensation_max_usd=20.0,
         attachment_dir="/tmp/shouhou-agent-test-attachments",
         return_policy_text="Return address: 123 Test Street, return within 30 days.",
     )
@@ -39,6 +43,19 @@ def _reset_login_rate_limiter():
 
     auth_module._ip_attempts.clear()
     auth_module._account_failures.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_alert_failure_counters():
+    """Clear the process-local LLM/IMAP failure counters before each test."""
+
+    from app.services import alerting
+    from app.services import scheduler as scheduler_module
+
+    alerting.reset_failure_counters()
+    scheduler_module._alerted_sla_ticket_ids.clear()
+    scheduler_module._alerted_retention_reply_ids.clear()
     yield
 
 

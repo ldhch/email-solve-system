@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from email.message import EmailMessage
 
 from sqlalchemy import select
@@ -52,6 +53,29 @@ def test_parse_missing_message_id_generates_synthetic() -> None:
     msg.set_content("hello")
     parsed = parse_email(bytes(msg))
     assert parsed.message_id.startswith("gen-")
+
+
+def test_parse_received_at_converts_timezone_to_utc() -> None:
+    plus8 = make_raw_email(date="Tue, 12 Aug 2026 10:00:00 +0800")
+    minus8 = make_raw_email(date="Tue, 12 Aug 2026 10:00:00 -0800")
+    naive_zone = make_raw_email(date="Tue, 12 Aug 2026 10:00:00")
+
+    # All results must be naive UTC so SLA math against utcnow() is stable.
+    assert parse_email(plus8).received_at == datetime(2026, 8, 12, 2, 0)
+    assert parse_email(minus8).received_at == datetime(2026, 8, 12, 18, 0)
+    assert parse_email(naive_zone).received_at == datetime(2026, 8, 12, 10, 0)
+
+
+def test_parse_received_at_missing_date_falls_back_to_utc_now() -> None:
+    from app.services.audit import utcnow
+
+    msg = EmailMessage()
+    msg["Subject"] = "No date"
+    msg["From"] = "a@example.com"
+    msg.set_content("hello")
+    parsed = parse_email(bytes(msg))
+    assert parsed.received_at.tzinfo is None
+    assert abs((utcnow() - parsed.received_at).total_seconds()) < 10
 
 
 def test_parse_html_sanitized() -> None:

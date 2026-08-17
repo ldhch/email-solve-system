@@ -18,4 +18,5 @@ class SystemStatusResponse(BaseModel):
 
 class HealthzResponse(BaseModel):
     db: str = "ok"
+    scheduler: str = "ok"
     uptime_sec: int

@@ -10,5 +10,8 @@ Write a short English reply that:
   discount on their next order) so they can keep the item.
 - Does NOT promise a specific amount or percentage: the owner reviews this
   draft before sending and may edit it.
+- Compensation cap: never suggest a total amount above {compensation_max_usd} USD.
+  If the customer explicitly asks for more than the cap, keep the offer
+  within the cap; the owner reviews the draft and may adjust it before sending.
 - Never invents order numbers, prices or policies.
 - Output only the email body; no greeting header or signature block.

@@ -93,9 +93,15 @@ def test_resolve_action_mapping() -> None:
     assert resolve_action("low", "product_spec") == "auto_send"
     assert resolve_action("low", "gratitude") == "auto_send"
     assert resolve_action("low", "refund_request") == "escalate"
-    assert resolve_action("medium", "product_spec") == "review"
+    # Boss decision (方案 A): pure consultations auto-send even if medium.
+    assert resolve_action("medium", "product_spec") == "auto_send"
+    assert resolve_action("medium", "policy") == "auto_send"
+    assert resolve_action("medium", "warranty") == "auto_send"
+    assert resolve_action("medium", "usage") == "auto_send"
+    assert resolve_action("medium", "gratitude") == "review"
     assert resolve_action("medium", "logistics_inquiry") == "escalate"
     assert resolve_action("medium", "invoice") == "escalate"
+    assert resolve_action("medium", "order_modification") == "escalate"
     assert resolve_action("high", "refund_request") == "escalate"
     assert resolve_action("unknown", "other") == "escalate"
 

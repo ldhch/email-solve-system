@@ -1,0 +1,45 @@
+# HTTPS template for the frontend container.
+# 1) Replace YOUR_DOMAIN with the real domain.
+# 2) Replace the volume-mounted /etc/nginx/conf.d/default.conf with this file
+#    (e.g. docker compose exec frontend sh -c 'cat > ...' or rebuild the image).
+# 3) Issue the certificate with the certbot service (see README).
+server {
+    listen 80;
+    server_name YOUR_DOMAIN;
+
+    # ACME http-01 challenge handled by the certbot webroot volume.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name YOUR_DOMAIN;
+
+    ssl_certificate /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location /api/ {
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

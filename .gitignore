@@ -21,6 +21,11 @@ data/*
 !data/exports/
 !data/exports/.gitkeep
 
+# Backend-local data dir must never be committed (secrets.bin could land here
+# from older path logic); keep it ignored even if it ever exists.
+backend/data/*
+!backend/data/.gitkeep
+
 # OS / editor
 .DS_Store
 .idea/
