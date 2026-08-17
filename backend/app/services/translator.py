@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
+from app.config import prompts_dir
 from app.llm.client import BaseLLMClient
 
 TRANSLATE_SYSTEM_PROMPT = """\
@@ -18,9 +17,7 @@ Rules:
 
 
 def _load_prompt() -> str:
-    prompt_file = (
-        Path(__file__).resolve().parents[2] / "docs" / "prompts" / "translate_reply.md"
-    )
+    prompt_file = prompts_dir() / "translate_reply.md"
     if prompt_file.exists():
         return prompt_file.read_text(encoding="utf-8")
     return TRANSLATE_SYSTEM_PROMPT

@@ -32,3 +32,16 @@ class MergeConversationRequest(BaseModel):
 class TicketUpdateRequest(BaseModel):
     status: str | None = None
     owner_reply_cn: str | None = None
+
+
+class QAPairCreateRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    answer: str = Field(min_length=1, max_length=10000)
+    category: str | None = Field(default=None, max_length=100)
+
+
+class QAPairUpdateRequest(BaseModel):
+    question: str | None = Field(default=None, min_length=1, max_length=2000)
+    answer: str | None = Field(default=None, min_length=1, max_length=10000)
+    category: str | None = Field(default=None, max_length=100)
+    enabled: bool | None = None

@@ -29,3 +29,19 @@ class LLMError(ShouhouError):
 
 class AIPausedError(ShouhouError):
     """System is in emergency-pause state."""
+
+
+class KnowledgeError(ShouhouError):
+    """Knowledge base upload/extraction failure."""
+
+
+class KnowledgeUnsupportedError(KnowledgeError):
+    """File type is not pdf/docx/md."""
+
+
+class KnowledgeTooLargeError(KnowledgeError):
+    """Upload exceeds the 20MB limit."""
+
+
+class KnowledgeEmptyError(KnowledgeError):
+    """No plain text could be extracted from the file."""

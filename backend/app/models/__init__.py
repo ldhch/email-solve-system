@@ -5,6 +5,8 @@ from app.models.audit import AuditLog
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.email import Email
+from app.models.knowledge_doc import KnowledgeDoc
+from app.models.qa_pair import QAPair
 from app.models.reply import Reply
 from app.models.system_state import SystemState
 from app.models.ticket import Ticket
@@ -16,6 +18,8 @@ __all__ = [
     "Conversation",
     "Customer",
     "Email",
+    "KnowledgeDoc",
+    "QAPair",
     "Reply",
     "SystemState",
     "Ticket",

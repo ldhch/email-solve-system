@@ -1,25 +1,27 @@
 """Reply generation + send orchestration (M-07).
 
 Phase 2 adds typed replies for the retention flow (exchange / compensation /
-release / acceptance). Knowledge base / standard QA injection arrives in
-Phase 3. No fabricated facts are allowed in the prompt.
+release / acceptance). Phase 3 adds the high-risk reassurance reply plus
+standard-QA / knowledge-base injection for general replies. No fabricated
+facts are allowed in the prompt.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import Settings
+from app.config import Settings, prompts_dir
 from app.core.exceptions import SMTPError
 from app.llm.client import BaseLLMClient
 from app.models.conversation import Conversation
 from app.models.email import Email
 from app.models.reply import Reply
+from app.services.knowledge import KnowledgeService
+from app.services.qa import QAService, match_qa
 from app.services.audit import log_action, utcnow
 
 logger = logging.getLogger(__name__)
@@ -62,11 +64,41 @@ return. Write a short warm English reply that:
 - Output only the email body; no greeting header or signature block.
 """
 
+REASSURANCE_SYSTEM_PROMPT = """\
+You are a customer-support agent for a small online store. The customer sent a
+high-risk or escalated message (possible dispute, complaint or urgent issue).
+Write a short, calm English acknowledgment that:
+- Thanks the customer for contacting us and apologizes for the frustration.
+- Promises that a dedicated support agent will reply within 24 hours.
+- Does NOT promise any refund, compensation, replacement or policy outcome.
+- Never invents order numbers, dates or facts.
+- Output only the email body; no greeting header or signature block.
+"""
+
+COMPENSATION_SYSTEM_PROMPT = """\
+You are a customer-support agent for a small online store. The customer is
+hesitant (changed their mind / bought the wrong item) and asked for a refund.
+Write a short English reply that:
+- Thanks them for their honesty and apologizes for the inconvenience.
+- Offers a goodwill alternative (for example a partial refund or a small
+  discount on their next order) so they can keep the item.
+- Does NOT promise a specific amount or percentage: the owner reviews this
+  draft before sending and may edit it.
+- Compensation cap: never suggest a total amount above {compensation_max_usd} USD.
+  If the customer explicitly asks for more than the cap, keep the offer
+  within the cap; the owner reviews the draft and may adjust it before sending.
+- Never invents order numbers, prices or policies.
+- Output only the email body; no greeting header or signature block.
+"""
+
+UNCONFIRMED_MARKER = (
+    'Please note: some information is not confirmed and requires '
+    "manual verification."
+)
+
 
 def _load_prompt(name: str, fallback: str) -> str:
-    prompt_file = (
-        Path(__file__).resolve().parents[2] / "docs" / "prompts" / name
-    )
+    prompt_file = prompts_dir() / name
     if prompt_file.exists():
         return prompt_file.read_text(encoding="utf-8")
     return fallback
@@ -74,8 +106,33 @@ def _load_prompt(name: str, fallback: str) -> str:
 
 RETENTION_PROMPT_FILES = {
     "retention_exchange": "retention_exchange.md",
-    "retention_compensation": "retention_compensation.md",
 }
+
+
+def build_general_system_prompt(qa_pairs: list, kb_text: str) -> str:
+    """Compose the general-reply system prompt (QA + KB full injection)."""
+
+    sections = [GENERATE_SYSTEM_PROMPT]
+    if qa_pairs:
+        lines = [
+            "Standard Q&A (if the customer's question matches one of these, "
+            "output that standard answer VERBATIM; do not rewrite or embellish):"
+        ]
+        for pair in qa_pairs:
+            lines.append(f"Q: {pair.question}\nA: {pair.answer}")
+        sections.append("\n".join(lines))
+    if kb_text:
+        sections.append(
+            "Company knowledge base (use ONLY this information; never invent "
+            f"facts):\n{kb_text}"
+        )
+    sections.append(
+        "If the customer's question is NOT covered by the standard Q&A or the "
+        "knowledge base, reply with a general, polite message that asks for the "
+        f"order number if needed, and include this exact sentence: "
+        f'"{UNCONFIRMED_MARKER}"'
+    )
+    return "\n\n".join(sections)
 
 
 def new_outbound_message_id(settings: Settings) -> str:
@@ -93,20 +150,25 @@ class ReplierService:
         self.settings = settings
         self.llm_client = llm_client
 
-    def _conversation_history(self, conversation: Conversation, current: Email) -> list[dict[str, str]]:
-        """Build the prompt context: recent history plus the current email.
+    def _timeline_context(
+        self,
+        conversation: Conversation,
+        exclude_email_ids: set[int],
+        current_emails: list[Email],
+    ) -> list[dict[str, str]]:
+        """Build the prompt context: recent history plus current email(s).
 
-        The current email is always appended as the final `[customer]` turn,
-        otherwise the model would only see older turns and answer blindly
-        (PRD F2 requires aggregating every open question in the conversation).
+        The current email(s) are always appended as the final `[customer]`
+        turns, otherwise the model would answer blindly (PRD F2 requires
+        aggregating every open question in the conversation).
         """
 
-        emails = self.db.execute(
+        history_emails = self.db.execute(
             select(Email)
             .where(
                 Email.conversation_id == conversation.id,
                 Email.is_inbound.is_(True),
-                Email.id != current.id,
+                Email.id.not_in(exclude_email_ids),
             )
             .order_by(Email.received_at.asc())
         ).scalars().all()
@@ -117,7 +179,7 @@ class ReplierService:
         ).scalars().all()
 
         timeline: list[tuple] = []
-        for email in emails:
+        for email in history_emails:
             timeline.append((email.received_at, "customer", email.body_text or ""))
         for reply in replies:
             timeline.append((reply.sent_at or reply.created_at, "agent", reply.content_en))
@@ -126,10 +188,22 @@ class ReplierService:
         lines = []
         for _, speaker, content in timeline[-6:]:
             lines.append(f"[{speaker}] {content}\n")
-        history = "\n".join(lines)
-        current_text = f"[customer] {current.body_text or ''}\n"
-        content = f"{history}\n{current_text}" if history else current_text
+        for email in sorted(current_emails, key=lambda e: (e.received_at, e.id)):
+            lines.append(f"[customer] {email.body_text or ''}\n")
+        content = "\n".join(lines)
         return [{"role": "user", "content": content}]
+
+    def _conversation_history(self, conversation: Conversation, current: Email) -> list[dict[str, str]]:
+        return self._timeline_context(conversation, {current.id}, [current])
+
+    def _batch_context(
+        self, conversation: Conversation, new_emails: list[Email]
+    ) -> list[dict[str, str]]:
+        """Prompt context for one aggregated reply over a poll batch."""
+
+        return self._timeline_context(
+            conversation, {e.id for e in new_emails}, new_emails
+        )
 
     def generate(
         self,
@@ -141,14 +215,62 @@ class ReplierService:
         messages = self._conversation_history(conversation, email_row)
         if reply_type in RETENTION_PROMPT_FILES:
             prompt = _load_prompt(RETENTION_PROMPT_FILES[reply_type], GENERATE_SYSTEM_PROMPT)
+        elif reply_type == "retention_compensation":
+            prompt = _load_prompt(
+                "retention_compensation.md", COMPENSATION_SYSTEM_PROMPT
+            ).format(compensation_max_usd=f"{self.settings.compensation_max_usd:.0f}")
         elif reply_type == "retention_release":
             prompt = RETURN_HANDLING_SYSTEM_PROMPT.format(
                 return_policy=return_policy_text or "(none provided)"
             )
         elif reply_type == "retention_accepted":
             prompt = ACCEPTANCE_CONFIRMATION_SYSTEM_PROMPT
+        elif reply_type == "reassurance":
+            prompt = _load_prompt("reassurance.md", REASSURANCE_SYSTEM_PROMPT)
         else:
-            prompt = GENERATE_SYSTEM_PROMPT
+            qa_pairs = QAService(self.db).list_active(limit=100)
+            matched = match_qa(email_row.body_text or "", qa_pairs)
+            if matched is not None:
+                logger.info(
+                    "QA hit (id=%s) for email id=%s; using stored answer",
+                    matched.id,
+                    email_row.id,
+                )
+                return matched.answer
+            prompt = build_general_system_prompt(qa_pairs, KnowledgeService(self.db).full_text())
+        return self.llm_client.chat_with_retry(
+            messages=messages,
+            system_prompt=prompt,
+        ).strip()
+
+    def generate_aggregated(
+        self,
+        new_emails: list[Email],
+        conversation: Conversation,
+    ) -> str:
+        """Generate ONE English reply covering every new email in the batch.
+
+        PRD F2 / edge case 3: a customer sending N mails in a short window gets
+        a single reply that aggregates all open questions (no reply spam).
+        QA hits use the combined batch body; otherwise the general prompt with
+        QA + knowledge-base injection is used.
+        """
+
+        messages = self._batch_context(conversation, new_emails)
+        combined_body = "\n".join(
+            e.body_text or ""
+            for e in sorted(new_emails, key=lambda e: (e.received_at, e.id))
+        )
+        qa_pairs = QAService(self.db).list_active(limit=100)
+        matched = match_qa(combined_body, qa_pairs)
+        if matched is not None:
+            logger.info(
+                "QA hit (id=%s) for aggregated batch conversation=%s",
+                matched.id,
+                conversation.id,
+            )
+            return matched.answer
+        prompt = build_general_system_prompt(qa_pairs, KnowledgeService(self.db).full_text())
         return self.llm_client.chat_with_retry(
             messages=messages,
             system_prompt=prompt,
