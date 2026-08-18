@@ -106,6 +106,32 @@ class QAService:
         self.db.flush()
         return pair
 
+    def bulk_create(self, items: list[tuple[str, str, str | None]]) -> tuple[int, int]:
+        """Insert many pairs, skipping empty/duplicate questions.
+
+        Dedup is case-insensitive on `question`, both within the batch and
+        against non-deleted rows already in the DB. Returns (created, skipped).
+        """
+
+        existing = {
+            q.strip().lower()
+            for q in self.db.execute(
+                select(QAPair.question).where(QAPair.is_deleted.is_(False))
+            ).scalars().all()
+        }
+        created = 0
+        skipped = 0
+        seen: set[str] = set()
+        for question, answer, category in items:
+            key = question.strip().lower()
+            if not key or key in seen or key in existing:
+                skipped += 1
+                continue
+            seen.add(key)
+            self.create(question, answer, category)
+            created += 1
+        return created, skipped
+
     def update(self, pair_id: int, **fields) -> QAPair | None:
         pair = self.get(pair_id)
         if pair is None:

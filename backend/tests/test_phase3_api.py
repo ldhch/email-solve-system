@@ -134,3 +134,30 @@ def test_qa_pairs_validation(settings, session_factory) -> None:
         assert missing.status_code == 422
     finally:
         close_client(client)
+
+
+def test_qa_pairs_bulk_import(settings, session_factory) -> None:
+    client = _authed_client(settings, session_factory)
+    try:
+        payload = {
+            "items": [
+                {"question": "What is your return policy?", "answer": "30 days.", "category": "policy"},
+                {"question": "What is your return policy?", "answer": "dup within batch", "category": "policy"},
+                {"question": "How long does shipping take?", "answer": "5-7 days.", "category": "shipping"},
+            ]
+        }
+        resp = api(client, "POST", "/api/v1/qa-pairs/bulk", json=payload)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["data"] == {"created": 2, "skipped": 1}
+
+        # Re-importing the same batch skips everything (DB dedup).
+        resp2 = api(client, "POST", "/api/v1/qa-pairs/bulk", json=payload)
+        assert resp2.json()["data"] == {"created": 0, "skipped": 3}
+
+        listing = api(client, "GET", "/api/v1/qa-pairs")
+        assert len(listing.json()["data"]["items"]) == 2
+
+        empty = api(client, "POST", "/api/v1/qa-pairs/bulk", json={"items": []})
+        assert empty.status_code == 422
+    finally:
+        close_client(client)

@@ -1,0 +1,124 @@
+{
+  "items": [
+    {
+      "question": "What is your return policy?",
+      "answer": "We offer a 30-day return policy from the date you receive your order. Items must be unworn, unused, in their original condition, with original tags and packaging.\n\nFor personal-preference returns, customers are responsible for return shipping and a USD $20 Return Processing Fee applies. If an item arrives damaged, defective, or we shipped the wrong item, we'll make it right at no additional cost.\n\nIf you have any questions about sizing or a specific hat before ordering, we're happy to help.",
+      "category": "售前与政策"
+    },
+    {
+      "question": "How long does shipping take?",
+      "answer": "Orders are processed before shipment and delivery times may vary depending on the destination and carrier. Once your order ships, you'll receive tracking information so you can follow the delivery progress.\n\nIf you need the item for a specific date or event, please let us know before ordering and we'll help you assess the timing. We cannot guarantee a specific delivery date unless expressly confirmed.",
+      "category": "售前与政策"
+    },
+    {
+      "question": "How can I track my order?",
+      "answer": "Once your order has shipped, you can track it using your tracking number through our order tracking page:\n\nhttps://shoplbora.com/apps/17TRACK\n\nIf you need help interpreting the latest tracking status, please send us your order number and we'll be happy to check it for you.",
+      "category": "售前与政策"
+    },
+    {
+      "question": "Do you sell gift cards?",
+      "answer": "Please check the current LBORA website availability before replying. If gift cards are available, provide the official purchase link. If they are not currently available, let the customer know politely and offer help choosing a hat as a gift.",
+      "category": "售前与政策"
+    },
+    {
+      "question": "The hat is too big.",
+      "answer": "We're sorry the fit isn't what you expected. Many LBORA hats feature an adjustable inner band that may help create a more secure and comfortable fit.\n\nPlease try adjusting the inner band first. If the fit still doesn't work for you, let us know and we'll help with the next solution, which may include a partial refund or a return according to our Return Policy.",
+      "category": "尺码与适配"
+    },
+    {
+      "question": "The hat is too small.",
+      "answer": "We're sorry the hat feels too small. Please let us know your head circumference and the size shown on the hat label so we can verify the fit and sizing.\n\nIf the hat has an adjustable inner band, please make sure it is fully loosened. Once we confirm the sizing, we'll help you with the most appropriate solution.",
+      "category": "尺码与适配"
+    },
+    {
+      "question": "I followed your size chart but the hat doesn't fit.",
+      "answer": "Thank you for letting us know. Please send us your head circumference and a photo of the size label inside the hat. This will help us verify whether the correct size was shipped and whether the issue can be resolved through adjustment.\n\nIf the correct item was shipped but the fit still isn't suitable, we'll assist you according to our Return Policy.",
+      "category": "尺码与适配"
+    },
+    {
+      "question": "I want to return my hat.",
+      "answer": "We're sorry the hat didn't work out for you. Before we arrange the return, could you please let us know the reason for the return?\n\nIf possible, please also send photos showing the overall condition of the hat, the inside tag, and the original packaging. Depending on the issue, we may be able to offer a quicker solution without requiring a return.\n\nIf you still prefer to return it, we'll provide the authorized return instructions.",
+      "category": "退货与退款"
+    },
+    {
+      "question": "The item is new, but I simply don't want it.",
+      "answer": "We understand. Before proceeding with a return, we may offer a partial refund that allows you to keep the item and avoid return shipping costs.\n\nIf you prefer not to accept that option, we will honor the return according to our published Return Policy. For personal-preference returns, the customer is responsible for return shipping and a USD $20 Return Processing Fee will be deducted from the refund.",
+      "category": "退货与退款"
+    },
+    {
+      "question": "Why is there a $20 fee?",
+      "answer": "The USD $20 Return Processing Fee applies to eligible personal-preference returns and covers inspection, handling, and restocking costs.\n\nThe fee does not apply when the return is due to a verified manufacturing defect, shipping damage, or an incorrect item shipped by LBORA.",
+      "category": "退货与退款"
+    },
+    {
+      "question": "When will I receive my refund?",
+      "answer": "Once the returned item is received and inspected, we'll notify you of the refund status. If approved, the refund will be issued to your original payment method and processed within 10 business days.\n\nYour bank or card provider may require additional time for the funds to appear in your account.",
+      "category": "退货与退款"
+    },
+    {
+      "question": "Where should I return the item?",
+      "answer": "Please do not send an item back without prior authorization. Once your return is approved, we'll provide the appropriate authorized return address for your order.\n\nAfter shipping the return, please send us the tracking number so we can monitor the package and process your refund promptly after inspection.",
+      "category": "退货与退款"
+    },
+    {
+      "question": "The quality is not what I expected.",
+      "answer": "We're sorry the product didn't meet your expectations. Could you please tell us which aspect of the hat you're dissatisfied with and send a few clear photos of the item?\n\nThis will help us determine whether there is a product defect or whether the concern relates to fit, appearance, or personal preference, and we'll provide the appropriate solution.",
+      "category": "质量与商品状态"
+    },
+    {
+      "question": "The hat arrived dirty.",
+      "answer": "We're sorry to hear about your concern. Please send us clear photos showing the overall condition of the hat, the affected area, the inside product label, and the original packaging if available.\n\nOnce we receive the photos, we'll review the issue promptly and provide the appropriate solution.",
+      "category": "质量与商品状态"
+    },
+    {
+      "question": "The hat arrived damaged or broken.",
+      "answer": "We're very sorry that your hat arrived damaged. Please send us clear photos of the damaged item and packaging.\n\nOnce the damage is verified, we'll provide an appropriate solution, including a replacement or full refund at no additional cost. A Return Processing Fee does not apply to verified shipping damage.",
+      "category": "质量与商品状态"
+    },
+    {
+      "question": "The hat was crushed or deformed in transit.",
+      "answer": "We're sorry the hat arrived out of shape. Please send us photos showing the deformation.\n\nFor minor, recoverable deformation, we may provide reshaping guidance and compensation. If the damage is severe or the hat cannot reasonably be restored, we'll treat it as shipping damage and provide the appropriate replacement or refund solution.",
+      "category": "质量与商品状态"
+    },
+    {
+      "question": "I received the wrong item.",
+      "answer": "We're very sorry to hear that you may have received the wrong item.\n\nPlease send:\n1. A photo of the outer package and shipping label\n2. Photos of the item received, including the product/size label\n3. Your order number or order confirmation\n\nIf the shipping error is confirmed to be ours, we'll arrange a replacement or refund at no additional cost.",
+      "category": "发错货与换货"
+    },
+    {
+      "question": "I received the wrong size.",
+      "answer": "Please send us a clear photo of the size label inside the hat together with your order number. We'll compare it with the size ordered.\n\nIf we shipped the wrong size, we'll provide an appropriate replacement or refund at no additional cost.",
+      "category": "发错货与换货"
+    },
+    {
+      "question": "Can I exchange for another size or color?",
+      "answer": "We'll be happy to help. Please tell us the size/color you would like and we'll first confirm availability.\n\nIf the exchange is due to our shipping error or a verified defect, we'll cover the appropriate replacement costs. If the correct item was shipped and you simply prefer another size or style, the return will be handled according to our personal-preference return terms.",
+      "category": "发错货与换货"
+    },
+    {
+      "question": "I haven't received my order.",
+      "answer": "We're sorry you're still waiting. We'll check the latest carrier tracking before advising you.\n\nIf the package is still moving normally through the delivery network, we'll provide the latest status and tracking link. If tracking shows a prolonged exception, failed delivery, or possible loss, we'll investigate with the carrier and provide the appropriate next step.",
+      "category": "物流"
+    },
+    {
+      "question": "Tracking says customs cleared / arrived at airport. What happens next?",
+      "answer": "Your package has reached the destination network and is moving toward final delivery. After customs clearance or airport arrival, it will normally be transferred to a local carrier.\n\nTracking can pause briefly during the handoff between carriers. You can continue following updates through our tracking page.",
+      "category": "物流"
+    },
+    {
+      "question": "Shopify says 'waiting for details' but the package has moved.",
+      "answer": "Sometimes Shopify's tracking display updates later than the carrier's tracking system.\n\nWe'll check the carrier's latest status for you. If the carrier shows movement, your package is still progressing even if Shopify temporarily shows “waiting for details.”",
+      "category": "物流"
+    },
+    {
+      "question": "Delivery was unsuccessful.",
+      "answer": "We're sorry the delivery attempt was unsuccessful. We'll first verify the latest carrier status and whether a second delivery attempt, local pickup, or return-to-sender process is available.\n\nIf the package is confirmed undeliverable or lost, we'll work with you on the appropriate replacement or refund solution.",
+      "category": "物流"
+    },
+    {
+      "question": "I purchased Shipping Protection. What does it cover?",
+      "answer": "If your order includes Shipping Protection and you experience a covered issue such as package loss, damage, or eligible shipping delay, the claim should be handled according to the applicable SureCircle coverage terms.\n\nCustomer service should first verify the order and issue type, then provide the current official claim instructions. Avoid promising claim approval before the insurer has reviewed the case.",
+      "category": "物流保险"
+    }
+  ]
+}

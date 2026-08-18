@@ -8,7 +8,11 @@ from sqlalchemy.orm import Session
 from app.api.auth import require_owner
 from app.api.common import ok
 from app.db.session import get_db
-from app.schemas.admin import QAPairCreateRequest, QAPairUpdateRequest
+from app.schemas.admin import (
+    QAPairBulkRequest,
+    QAPairCreateRequest,
+    QAPairUpdateRequest,
+)
 from app.services.audit import log_action
 from app.services.qa import QAService
 
@@ -66,6 +70,30 @@ async def create_qa_pair(
     )
     db.commit()
     return ok(_item(pair))
+
+
+@router.post("/qa-pairs/bulk")
+async def bulk_create_qa_pairs(
+    payload: QAPairBulkRequest,
+    request: Request,
+    user=Depends(require_owner),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Import many QA pairs at once; duplicates are skipped (M-14)."""
+
+    items = [(i.question, i.answer, i.category) for i in payload.items]
+    created, skipped = QAService(db).bulk_create(items)
+    log_action(
+        db,
+        "qa_bulk_import",
+        "qa",
+        0,
+        actor_id=user.id,
+        ip=_ip(request),
+        commit=False,
+    )
+    db.commit()
+    return ok({"created": created, "skipped": skipped})
 
 
 @router.patch("/qa-pairs/{pair_id}")

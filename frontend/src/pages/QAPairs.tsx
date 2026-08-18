@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { dataOf, errorText, http } from "../api/client";
 import { Layout } from "../components/Layout";
 
@@ -20,6 +20,7 @@ export default function QAPairs() {
   const [answer, setAnswer] = useState("");
   const [category, setCategory] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -101,9 +102,57 @@ export default function QAPairs() {
     }
   }
 
+  async function importFile(file: File) {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(await file.text());
+    } catch {
+      setError("导入文件不是有效的 JSON");
+      return;
+    }
+    const items = (payload as { items?: unknown }).items;
+    if (!Array.isArray(items) || items.length === 0) {
+      setError("JSON 缺少 items 数组，格式应为 {\"items\": [{question, answer, category}]}");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setSuccess("");
+    try {
+      const resp = await http.post("/qa-pairs/bulk", { items });
+      const { created, skipped } = dataOf<{ created: number; skipped: number }>(resp);
+      setSuccess(`批量导入完成：新增 ${created} 条，跳过 ${skipped} 条（重复或无效）`);
+      await load();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
   return (
     <Layout>
-      <h1 className="text-lg font-bold mb-4">标准问答（QA）</h1>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-lg font-bold">标准问答（QA）</h1>
+        <button
+          onClick={() => fileRef.current?.click()}
+          disabled={busy}
+          className="px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {busy ? "导入中…" : "批量导入 JSON"}
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".json,application/json"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) importFile(file);
+          }}
+        />
+      </div>
       <p className="text-sm text-gray-500 mb-4">
         老板维护的标准问答会在回复生成时全量注入；客户问题命中时直接输出标准英文答案（最多 100 条）。
       </p>
