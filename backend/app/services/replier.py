@@ -26,6 +26,17 @@ from app.services.audit import log_action, utcnow
 
 logger = logging.getLogger(__name__)
 
+# Every customer-facing reply must be a complete letter-like email: a greeting
+# line, the body, a closing and a signature. The customer name is read from the
+# conversation when available; inventing one is forbidden.
+EMAIL_FORMAT_RULE = (
+    "- Write a complete standard business email in letter format: a greeting "
+    'line ("Dear [customer first name]," — use the customer\'s name from the '
+    'conversation when available, otherwise "Hi there,"), the reply body, '
+    'a closing "Best regards,", and a signature "The LBORA Team". '
+    "Never invent a customer name."
+)
+
 GENERATE_SYSTEM_PROMPT = """\
 You are a professional customer-support agent writing English replies for a
 small online store. Follow these rules strictly:
@@ -35,8 +46,7 @@ small online store. Follow these rules strictly:
 - If the customer asks for information you do not have, ask them to provide
   their order number instead of guessing.
 - For a thank-you note, reply briefly and warmly.
-- Output only the final email body, no greetings/headers, no signature block.
-"""
+""" + EMAIL_FORMAT_RULE
 
 RETURN_HANDLING_SYSTEM_PROMPT = """\
 You are a customer-support agent for a small online store. The customer asked
@@ -47,7 +57,7 @@ Write a short English reply that:
 - If return instructions are provided below, include them; otherwise ask the
   customer to reply with their order number so we can arrange the return.
 - Never invents order numbers, addresses, refund amounts or policies.
-- Output only the email body; no greeting header or signature block.
+""" + EMAIL_FORMAT_RULE + """
 
 Return instructions:
 {return_policy}
@@ -61,8 +71,7 @@ return. Write a short warm English reply that:
   being arranged).
 - Asks them to reply with any missing info (order number) if needed.
 - Never invents order numbers, dates or policies.
-- Output only the email body; no greeting header or signature block.
-"""
+""" + EMAIL_FORMAT_RULE
 
 REASSURANCE_SYSTEM_PROMPT = """\
 You are a customer-support agent for a small online store. The customer sent a
@@ -72,8 +81,7 @@ Write a short, calm English acknowledgment that:
 - Promises that a dedicated support agent will reply within 24 hours.
 - Does NOT promise any refund, compensation, replacement or policy outcome.
 - Never invents order numbers, dates or facts.
-- Output only the email body; no greeting header or signature block.
-"""
+""" + EMAIL_FORMAT_RULE
 
 COMPENSATION_SYSTEM_PROMPT = """\
 You are a customer-support agent for a small online store. The customer is
@@ -88,8 +96,7 @@ Write a short English reply that:
   If the customer explicitly asks for more than the cap, keep the offer
   within the cap; the owner reviews the draft and may adjust it before sending.
 - Never invents order numbers, prices or policies.
-- Output only the email body; no greeting header or signature block.
-"""
+""" + EMAIL_FORMAT_RULE
 
 UNCONFIRMED_MARKER = (
     'Please note: some information is not confirmed and requires '

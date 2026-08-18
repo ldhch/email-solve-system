@@ -9,4 +9,8 @@ Write a short, calm English acknowledgment that:
 - Promises that a dedicated support agent will reply within 24 hours.
 - Does NOT promise any refund, compensation, replacement or policy outcome.
 - Never invents order numbers, dates or facts.
-- Output only the email body; no greeting header or signature block.
+- Write a complete standard business email in letter format: a greeting line
+  ("Dear [customer first name]," — use the customer's name from the
+  conversation when available, otherwise "Hi there,"), the reply body, a
+  closing "Best regards,", and a signature "The LBORA Team". Never invent a
+  customer name.

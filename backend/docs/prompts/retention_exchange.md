@@ -10,4 +10,8 @@ Write a short English reply that:
 - Asks them to reply with their order number and the desired size so we can
   start the exchange.
 - Never invents order numbers, prices, deadlines or policies.
-- Output only the email body; no greeting header or signature block.
+- Write a complete standard business email in letter format: a greeting line
+  ("Dear [customer first name]," — use the customer's name from the
+  conversation when available, otherwise "Hi there,"), the reply body, a
+  closing "Best regards,", and a signature "The LBORA Team". Never invent a
+  customer name.

@@ -14,4 +14,8 @@ Write a short English reply that:
   If the customer explicitly asks for more than the cap, keep the offer
   within the cap; the owner reviews the draft and may adjust it before sending.
 - Never invents order numbers, prices or policies.
-- Output only the email body; no greeting header or signature block.
+- Write a complete standard business email in letter format: a greeting line
+  ("Dear [customer first name]," — use the customer's name from the
+  conversation when available, otherwise "Hi there,"), the reply body, a
+  closing "Best regards,", and a signature "The LBORA Team". Never invent a
+  customer name.
