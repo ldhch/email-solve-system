@@ -119,6 +119,31 @@
       "question": "I purchased Shipping Protection. What does it cover?",
       "answer": "If your order includes Shipping Protection and you experience a covered issue such as package loss, damage, or eligible shipping delay, the claim should be handled according to the applicable SureCircle coverage terms.\n\nCustomer service should first verify the order and issue type, then provide the current official claim instructions. Avoid promising claim approval before the insurer has reviewed the case.",
       "category": "物流保险"
+    },
+    {
+      "question": "Can you change my order to a different size",
+      "answer": "Hi Ella,\n\nThank you for your reply! We've updated your order to the Large (59cm) size as requested. We'll arrange shipment as soon as possible, and you'll receive a shipping confirmation email with tracking once dispatched.\n\nBest regards,\nThe LBORA Team",
+      "category": "售前与政策"
+    },
+    {
+      "question": "My delivery failed and I don't want to contact the carrier again",
+      "answer": "Dear Customer,\n\nWe completely understand your frustration and sincerely apologize for the inconvenience. We are reviewing the failed delivery status and will continue to follow up without asking you to go back and forth with the carrier. If the package is confirmed undeliverable, we will arrange the appropriate refund or replacement solution.\n\nBest regards,\nThe LBORA Team",
+      "category": "物流"
+    },
+    {
+      "question": "I will file a dispute or chargeback with my bank",
+      "answer": "Dear Jason,\n\nWe sincerely apologize for the delayed response and understand your frustration. Thank you for providing your measurements and photos. If a dispute has already been opened, we need to avoid duplicate reimbursement. Please confirm the current dispute status, and we will proceed with the appropriate resolution as soon as the payment system allows.\n\nBest regards,\nThe LBORA Team",
+      "category": "拒付风险"
+    },
+    {
+      "question": "bait and switch, I will file a consumer complaint and a credit card dispute",
+      "answer": "Dear Jean,\n\nWe sincerely apologize that the fit and delivery timing did not meet your expectations.\n\nOption 1: Keep the hats and receive a USD $55 partial refund, with no return required.\nOption 2: Return the hats under our published Return Policy. Return shipping is the customer's responsibility, and a fixed USD $20 Return Processing Fee will be deducted.\n\nPlease let us know which option you prefer.\n\nBest regards,\nThe LBORA Team",
+      "category": "拒付风险"
+    },
+    {
+      "question": "The hat is severely damaged and I am traveling soon, a replacement will not work",
+      "answer": "Dear Amy,\n\nWe're truly sorry that your hat arrived in this condition. We have reviewed the photo and completely understand that, since you're leaving the country tomorrow, a replacement would no longer meet your needs. We will therefore arrange a full refund to your original payment method. There is no need to return the severely damaged hat.\n\nBest regards,\nThe LBORA Team",
+      "category": "质量与商品状态"
     }
   ]
 }
