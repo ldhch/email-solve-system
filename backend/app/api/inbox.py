@@ -7,6 +7,7 @@ so the owner scans one thread at a time instead of one email at a time.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -23,6 +24,7 @@ from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.email import Email
 from app.models.reply import Reply
+from app.models.ticket import Ticket
 
 router = APIRouter(prefix="/api/v1", tags=["inbox"])
 
@@ -48,12 +50,26 @@ def _latest_reply_per_conversation(db: Session) -> dict[int, Reply]:
     return {r.conversation_id: r for r in replies}
 
 
+def _latest_sla_deadline_per_conversation(db: Session) -> dict[int, datetime]:
+    """Map conversation_id -> latest open-ticket SLA deadline."""
+
+    rows = db.execute(
+        select(Ticket.conversation_id, func.max(Ticket.sla_deadline))
+        .where(Ticket.is_deleted.is_(False), Ticket.status != "resolved")
+        .group_by(Ticket.conversation_id)
+    ).all()
+    return {conversation_id: deadline for conversation_id, deadline in rows}
+
+
 def _conversation_rows(
     db: Session,
     *,
     risk_level: str | None,
     status: str | None,
     keyword: str | None,
+    sort: str = "latest",
+    conv_status: str | None = None,
+    unread_only: bool = False,
 ) -> list[dict]:
     """Fold emails into one row per conversation.
 
@@ -70,6 +86,8 @@ def _conversation_rows(
         conv_emails.setdefault(e.conversation_id, []).append(e)
 
     latest_replies = _latest_reply_per_conversation(db)
+    sla_deadlines = _latest_sla_deadline_per_conversation(db)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     conversations = {
         c.id: c
@@ -132,6 +150,12 @@ def _conversation_rows(
             continue
         if status and latest_status != status:
             continue
+        if conv_status and conv.status != conv_status:
+            continue
+        if unread_only and unread == 0:
+            continue
+
+        deadline = sla_deadlines.get(cid)
 
         rows.append(
             {
@@ -145,11 +169,31 @@ def _conversation_rows(
                 "summary_cn": summary,
                 "latest_status": latest_status,
                 "latest_at": _fmt(latest_at),
+                "sla_deadline": _fmt(deadline),
+                "sla_breached": bool(deadline and now > deadline),
+                "sla_near": bool(
+                    deadline and now <= deadline and deadline - now <= timedelta(hours=2)
+                ),
+                "_latest_at": latest_at,
                 "is_read": unread == 0,
             }
         )
 
-    rows.sort(key=lambda r: r["latest_at"] or "", reverse=True)
+    def _latest_ts(row: dict) -> float:
+        latest = row["_latest_at"]
+        return latest.timestamp() if latest else 0.0
+
+    if sort == "unread":
+        rows.sort(key=lambda r: (-r["unread_count"], -_latest_ts(r)))
+    elif sort == "risk":
+        rows.sort(
+            key=lambda r: (-_RISK_ORDER.get(r["risk_level"] or "", 0), -_latest_ts(r))
+        )
+    else:
+        rows.sort(key=lambda r: -_latest_ts(r))
+
+    for row in rows:
+        row.pop("_latest_at", None)
     return rows
 
 
@@ -157,6 +201,9 @@ def _conversation_rows(
 async def list_inbox(
     risk_level: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    sort: str = Query(default="latest"),
+    conv_status: str | None = Query(default=None),
+    unread_only: bool = Query(default=False),
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=100),
     keyword: str | None = Query(default=None),
@@ -165,7 +212,15 @@ async def list_inbox(
 ) -> dict:
     """Conversation-level inbox list with risk/status/keyword filters."""
 
-    rows = _conversation_rows(db, risk_level=risk_level, status=status, keyword=keyword)
+    rows = _conversation_rows(
+        db,
+        risk_level=risk_level,
+        status=status,
+        keyword=keyword,
+        sort=sort,
+        conv_status=conv_status,
+        unread_only=unread_only,
+    )
     total = len(rows)
     start = (page - 1) * size
     return ok({"items": rows[start : start + size], "total": total, "page": page})

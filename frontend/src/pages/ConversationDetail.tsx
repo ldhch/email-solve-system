@@ -2,9 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { dataOf, errorText, http } from "../api/client";
 import { Layout } from "../components/Layout";
+import { ReplyDraftEditor } from "../components/ReplyDraftEditor";
 import { ReplyEditor } from "../components/ReplyEditor";
 import { RiskTag } from "../components/RiskTag";
 import { Timeline, TimelineItem } from "../components/Timeline";
+import { formatLocal } from "../utils/format";
 
 interface ConversationData {
   id: number;
@@ -31,7 +33,6 @@ export default function ConversationDetail() {
   const [showCn, setShowCn] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [edits, setEdits] = useState<Record<number, string>>({});
   const [splitOpen, setSplitOpen] = useState(false);
   const [splitEmailId, setSplitEmailId] = useState<number | null>(null);
   const [mergeOpen, setMergeOpen] = useState(false);
@@ -53,29 +54,6 @@ export default function ConversationDetail() {
     const timer = setInterval(load, 5000); // F-02: 5s polling, no websocket
     return () => clearInterval(timer);
   }, [load]);
-
-  async function editDraft(replyId: number) {
-    const content = edits[replyId];
-    if (!content?.trim()) return;
-    setError("");
-    try {
-      await http.patch(`/replies/${replyId}`, { content_cn: content.trim() });
-      setEdits((prev) => ({ ...prev, [replyId]: "" }));
-      await load();
-    } catch (err) {
-      setError(errorText(err));
-    }
-  }
-
-  async function sendDraft(replyId: number) {
-    setError("");
-    try {
-      await http.post(`/replies/${replyId}/send`);
-      await load();
-    } catch (err) {
-      setError(errorText(err));
-    }
-  }
 
   async function doSplit() {
     if (!splitEmailId) return;
@@ -159,7 +137,7 @@ export default function ConversationDetail() {
           )}
           {data.sla_deadline && (
             <span className="text-red-600">
-              SLA 截止：{data.sla_deadline.replace("T", " ").replace("Z", "")}
+              SLA 截止：{formatLocal(data.sla_deadline)}
             </span>
           )}
           <button
@@ -223,7 +201,7 @@ export default function ConversationDetail() {
             {splitCandidates.map((e) => (
               <option key={e.email_id} value={e.email_id}>
                 #{e.email_id} ·{" "}
-                {e.at ? e.at.replace("T", " ").replace("Z", "") : ""} ·{" "}
+                {formatLocal(e.at ?? null)} ·{" "}
                 {(e.summary_cn || e.content || "").slice(0, 30)}
               </option>
             ))}
@@ -287,44 +265,7 @@ export default function ConversationDetail() {
 
       <Timeline items={data.timeline} showCn={showCn} onRefresh={load} />
 
-      {/* Rejected drafts: edit + send */}
-      {data.timeline
-        .filter((t) => t.type === "reply" && t.status === "draft" && t.reply_id)
-        .map((t) => (
-          <div
-            key={t.reply_id}
-            className="mt-4 bg-yellow-50 rounded-lg border border-yellow-200 p-4"
-          >
-            <h3 className="text-sm font-medium text-yellow-800 mb-2">
-              草稿（可编辑后发送）
-            </h3>
-            <textarea
-              defaultValue={t.content_cn || t.content_en}
-              onChange={(e) =>
-                setEdits((prev) => ({
-                  ...prev,
-                  [t.reply_id!]: e.target.value,
-                }))
-              }
-              rows={4}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-            />
-            <div className="mt-2 flex gap-2 justify-end">
-              <button
-                onClick={() => editDraft(t.reply_id!)}
-                className="px-3 py-1 border border-gray-300 rounded text-sm"
-              >
-                保存修改（重新翻译）
-              </button>
-              <button
-                onClick={() => sendDraft(t.reply_id!)}
-                className="px-3 py-1 bg-green-600 text-white rounded text-sm"
-              >
-                直接发送
-              </button>
-            </div>
-          </div>
-        ))}
+      <ReplyDraftEditor items={data.timeline} onChanged={load} />
 
       <div className="mt-4">
         <ReplyEditor conversationId={data.id} onSent={load} />

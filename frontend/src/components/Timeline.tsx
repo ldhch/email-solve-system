@@ -1,5 +1,5 @@
-import DOMPurify from "dompurify";
 import { http } from "../api/client";
+import { formatLocal } from "../utils/format";
 
 export interface TimelineItem {
   type: "email" | "reply" | "attachment";
@@ -16,6 +16,7 @@ export interface TimelineItem {
   size_bytes?: number | null;
   status?: string;
   reply_type?: string;
+  source?: string;
   filename?: string;
   at?: string | null;
 }
@@ -36,12 +37,16 @@ const STATUS_LABEL: Record<string, string> = {
 
 const TYPE_LABEL: Record<string, string> = {
   email: "客户来信",
-  reply: "系统 / 人工回复",
+  reply: "回复",
   attachment: "附件",
 };
 
-function fmt(iso?: string | null): string {
-  return iso ? iso.replace("T", " ").replace("Z", "") : "";
+function typeLabel(item: TimelineItem): string {
+  if (item.type === "reply") {
+    if (item.source === "manual") return "人工回复";
+    if (item.source === "system") return "系统回复";
+  }
+  return TYPE_LABEL[item.type] || item.type;
 }
 
 export function Timeline({
@@ -69,7 +74,7 @@ export function Timeline({
         <li key={idx} className="py-4 first:pt-0 last:pb-0">
           <div className="flex items-center gap-2 mb-1.5 text-[11.5px] text-sub">
             <span className="font-medium text-ink">
-              {TYPE_LABEL[item.type] || item.type}
+              {typeLabel(item)}
             </span>
             {item.status && (
               <span
@@ -83,7 +88,7 @@ export function Timeline({
             {item.reply_type && item.reply_type !== "general" && (
               <span className="text-accent">{item.reply_type}</span>
             )}
-            <span className="ml-auto tabular-nums">{fmt(item.at)}</span>
+            <span className="ml-auto tabular-nums">{formatLocal(item.at ?? null)}</span>
           </div>
 
           {item.type === "email" &&
@@ -91,13 +96,6 @@ export function Timeline({
               <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
                 {item.summary_cn}
               </div>
-            ) : item.body_html ? (
-              <div
-                className="text-[13.5px] leading-relaxed [&_img]:max-w-full [&_table]:w-full [&_a]:text-accent [&_a]:underline"
-                dangerouslySetInnerHTML={{
-                  __html: DOMPurify.sanitize(item.body_html),
-                }}
-              />
             ) : (
               <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
                 {item.content}

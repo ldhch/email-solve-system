@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { dataOf, errorText, http } from "../api/client";
 import { Layout } from "../components/Layout";
+import { ReplyDraftEditor } from "../components/ReplyDraftEditor";
+import { ReplyEditor } from "../components/ReplyEditor";
 import { RiskTag } from "../components/RiskTag";
 import { Timeline, TimelineItem } from "../components/Timeline";
+import { formatLocal } from "../utils/format";
 
 interface InboxItem {
   id: number; // conversation id
@@ -16,6 +19,9 @@ interface InboxItem {
   summary_cn: string | null;
   latest_status: string | null;
   latest_at: string | null;
+  sla_deadline: string | null;
+  sla_breached: boolean;
+  sla_near: boolean;
   is_read: boolean;
 }
 
@@ -51,15 +57,6 @@ const RISK_RAIL: Record<string, string> = {
   low: "bg-risk-low",
 };
 
-function fmtShort(iso: string | null): string {
-  if (!iso) return "";
-  const m = iso
-    .replace("T", " ")
-    .replace("Z", "")
-    .match(/^\d{4}-(\d{2}-\d{2}) (\d{2}:\d{2})/);
-  return m ? `${m[1]} ${m[2]}` : iso;
-}
-
 function Empty({ text }: { text: string }) {
   return (
     <div className="px-6 py-16 text-center text-[13px] text-sub">{text}</div>
@@ -69,10 +66,20 @@ function Empty({ text }: { text: string }) {
 export default function Inbox() {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [filter, setFilter] = useState<"all" | "pending_review" | "high">("all");
+  const [filter, setFilter] = useState<
+    "all" | "unread" | "pending_review" | "high"
+  >("all");
+  const [sort, setSort] = useState<"latest" | "unread" | "risk">("latest");
+  const [convStatus, setConvStatus] = useState<
+    "" | "open" | "resolved" | "escalated"
+  >("");
+  const [keywordInput, setKeywordInput] = useState("");
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
+  const loadingRef = useRef(false);
+  const requestSeq = useRef(0);
+  const itemsRef = useRef<InboxItem[]>([]);
+  const pageRef = useRef(1);
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [conv, setConv] = useState<ConversationData | null>(null);
@@ -82,37 +89,89 @@ export default function Inbox() {
 
   const navigate = useNavigate();
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params: Record<string, string | number> = { page, size: 20 };
-      if (filter === "pending_review") params.status = "pending_review";
-      if (filter === "high") params.risk_level = "high";
-      if (keyword.trim()) params.keyword = keyword.trim();
-      const resp = await http.get("/inbox", { params });
-      const data = dataOf<{ items: InboxItem[]; total: number }>(resp);
-      setItems(data.items);
-      setTotal(data.total);
-    } finally {
-      setLoading(false);
-    }
-  }, [page, filter, keyword]);
+  const load = useCallback(
+    async (mode: "replace" | "append" = "replace") => {
+      const seq = ++requestSeq.current;
+      loadingRef.current = true;
+      setLoading(true);
+      try {
+        // replace: re-fetch the whole visible set so fresh rows land in the
+        // correct sort position (polling / initial / filter reset).
+        // append: fetch the next page and merge, keeping earlier rows.
+        const params: Record<string, string | number | boolean> =
+          mode === "append"
+            ? { page: pageRef.current + 1, size: 20 }
+            : { page: 1, size: Math.max(itemsRef.current.length, 20) };
+        if (filter === "pending_review") params.status = "pending_review";
+        if (filter === "high") params.risk_level = "high";
+        if (filter === "unread") params.unread_only = true;
+        if (sort !== "latest") params.sort = sort;
+        if (convStatus) params.conv_status = convStatus;
+        if (keyword.trim()) params.keyword = keyword.trim();
+        const resp = await http.get("/inbox", { params });
+        const data = dataOf<{ items: InboxItem[]; total: number }>(resp);
+        if (seq !== requestSeq.current) return;
+        if (mode === "append") {
+          setItems((prev) => {
+            const merged = new Map<number, InboxItem>();
+            for (const item of prev) merged.set(item.id, item);
+            for (const item of data.items) merged.set(item.id, item);
+            return Array.from(merged.values());
+          });
+          pageRef.current += 1;
+        } else {
+          setItems(data.items);
+        }
+        setTotal(data.total);
+      } finally {
+        if (seq === requestSeq.current) {
+          loadingRef.current = false;
+          setLoading(false);
+        }
+      }
+    },
+    [filter, sort, convStatus, keyword],
+  );
+
+  function resetList() {
+    requestSeq.current += 1;
+    setItems([]);
+    pageRef.current = 1;
+  }
+
+  useEffect(() => {
+    const timer = setTimeout(() => setKeyword(keywordInput.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [keywordInput]);
+
+  useEffect(() => {
+    requestSeq.current += 1;
+    setItems([]);
+    pageRef.current = 1;
+  }, [keyword]);
 
   useEffect(() => {
     load();
+    const timer = setInterval(() => {
+      if (!loadingRef.current) load("replace");
+    }, 30000);
+    return () => clearInterval(timer);
   }, [load]);
 
-  // Keep a selection: when the list changes and the current row is gone,
-  // fall back to the newest row; clear the pane when the list is empty.
+  // Keep a live copy of the loaded rows so a polling replace can refetch the
+  // full visible set (with fresh sort order) regardless of how many were loaded.
   useEffect(() => {
-    if (loading) return;
+    itemsRef.current = items;
+  }, [items]);
+
+  // Clear the reading pane only when the filtered list becomes empty. If the
+  // selected row disappears from a later page, keep the open conversation.
+  useEffect(() => {
     if (items.length === 0) {
       setSelectedId(null);
       setConv(null);
-    } else if (!items.some((i) => i.id === selectedId)) {
-      setSelectedId(items[0].id);
     }
-  }, [items, loading, selectedId]);
+  }, [items]);
 
   const loadConv = useCallback(async (id: number) => {
     setConvLoading(true);
@@ -143,6 +202,7 @@ export default function Inbox() {
     if (item && !item.is_read) {
       try {
         await http.post(`/inbox/conversations/${id}/read`);
+        window.dispatchEvent(new Event("inbox:unread-changed"));
         setItems((prev) =>
           prev.map((i) =>
             i.id === id ? { ...i, is_read: true, unread_count: 0 } : i,
@@ -155,30 +215,39 @@ export default function Inbox() {
   }
 
   const selectedItem = items.find((i) => i.id === selectedId) ?? null;
+  const selectedIndex =
+    selectedId == null ? -1 : items.findIndex((i) => i.id === selectedId);
+  const prevItem = selectedIndex > 0 ? items[selectedIndex - 1] : null;
+  const nextItem =
+    selectedIndex >= 0 && selectedIndex < items.length - 1
+      ? items[selectedIndex + 1]
+      : null;
 
   const tabs = [
     { key: "all" as const, label: "全部" },
+    { key: "unread" as const, label: "未读" },
     { key: "pending_review" as const, label: "待审核" },
     { key: "high" as const, label: "高风险" },
   ];
 
   return (
     <Layout>
-      <div className="flex items-center justify-between gap-4 mb-4">
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
         <h1 className="text-[15px] font-semibold tracking-tight text-ink">
           收件箱
           {total > 0 && (
             <span className="ml-2 font-normal text-sub tabular-nums">{total}</span>
           )}
         </h1>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-end gap-3">
           <div className="flex items-center bg-white border border-line rounded-md p-0.5">
             {tabs.map((t) => (
               <button
                 key={t.key}
                 onClick={() => {
+                  if (filter === t.key) return;
                   setFilter(t.key);
-                  setPage(1);
+                  resetList();
                 }}
                 className={`px-3 py-1 rounded text-[13px] leading-none ${
                   filter === t.key
@@ -190,14 +259,44 @@ export default function Inbox() {
               </button>
             ))}
           </div>
-          <input
-            value={keyword}
+          <select
+            value={sort}
             onChange={(e) => {
-              setKeyword(e.target.value);
-              setPage(1);
+              const next = e.target.value as "latest" | "unread" | "risk";
+              if (next === sort) return;
+              setSort(next);
+              resetList();
             }}
+            className="h-[30px] border border-line rounded-md bg-white px-2 text-[13px] text-sub focus:border-accent focus:outline-none"
+          >
+            <option value="latest">最新活动</option>
+            <option value="unread">未读优先</option>
+            <option value="risk">风险优先</option>
+          </select>
+          <select
+            value={convStatus}
+            onChange={(e) => {
+              const next = e.target.value as
+                | ""
+                | "open"
+                | "resolved"
+                | "escalated";
+              if (next === convStatus) return;
+              setConvStatus(next);
+              resetList();
+            }}
+            className="h-[30px] border border-line rounded-md bg-white px-2 text-[13px] text-sub focus:border-accent focus:outline-none"
+          >
+            <option value="">全部状态</option>
+            <option value="open">进行中(open)</option>
+            <option value="resolved">已解决(resolved)</option>
+            <option value="escalated">人工介入(escalated)</option>
+          </select>
+          <input
+            value={keywordInput}
+            onChange={(e) => setKeywordInput(e.target.value)}
             placeholder="搜索客户 / 主题 / 摘要"
-            className="w-56 border border-line rounded-md bg-white px-3 py-1.5 text-[13px] placeholder:text-[#9AA1AB] focus:border-accent focus:outline-none"
+            className="w-56 h-[30px] border border-line rounded-md bg-white px-3 text-[13px] placeholder:text-[#9AA1AB] focus:border-accent focus:outline-none"
           />
         </div>
       </div>
@@ -205,7 +304,7 @@ export default function Inbox() {
       <div className="flex items-start gap-4 h-[calc(100vh-164px)]">
         {/* Left: conversation list */}
         <aside className="w-[340px] shrink-0 h-full bg-white border border-line rounded-lg flex flex-col overflow-hidden">
-          {loading ? (
+          {items.length === 0 && loading ? (
             <Empty text="加载中…" />
           ) : items.length === 0 ? (
             <Empty text="没有匹配的会话 — 客户来信会自动归并到这里。" />
@@ -218,8 +317,10 @@ export default function Inbox() {
                     className={`relative w-full text-left px-4 py-3 transition-colors ${
                       selectedId === item.id
                         ? "bg-accent-tint"
-                        : "hover:bg-[#F7F9FB]"
-                    }`}
+                        : item.unread_count > 0
+                          ? "bg-[#F7FAFF]"
+                          : "hover:bg-[#F7F9FB]"
+                    } ${item.unread_count > 0 ? "font-semibold" : "font-normal"}`}
                   >
                     {RISK_RAIL[item.risk_level ?? ""] && (
                       <span
@@ -259,8 +360,18 @@ export default function Inbox() {
                       <span className="text-[11px] text-sub tabular-nums">
                         {item.email_count} 封
                       </span>
+                      {item.sla_breached && (
+                        <span className="px-1.5 py-0.5 rounded bg-risk-high-tint text-risk-high text-[11px] font-medium">
+                          SLA 超时
+                        </span>
+                      )}
+                      {item.sla_near && (
+                        <span className="px-1.5 py-0.5 rounded bg-risk-medium-tint text-risk-medium text-[11px] font-medium">
+                          SLA 临期
+                        </span>
+                      )}
                       <span className="ml-auto text-[11px] text-sub tabular-nums">
-                        {fmtShort(item.latest_at)}
+                        {formatLocal(item.latest_at)}
                       </span>
                     </div>
                   </button>
@@ -270,23 +381,18 @@ export default function Inbox() {
           )}
           <div className="shrink-0 flex items-center justify-between px-4 py-2.5 border-t border-line text-[12px] text-sub">
             <span className="tabular-nums">共 {total} 个会话</span>
-            <div className="flex gap-2">
+            {loading ? (
+              <span>加载中…</span>
+            ) : items.length < total ? (
               <button
-                disabled={page <= 1}
-                onClick={() => setPage((p) => p - 1)}
-                className="px-2 py-0.5 border border-line rounded disabled:opacity-40 hover:bg-[#F7F9FB]"
+                onClick={() => load("append")}
+                className="px-2 py-0.5 border border-line rounded hover:bg-[#F7F9FB]"
               >
-                上一页
+                加载更多
               </button>
-              <span className="self-center tabular-nums">第 {page} 页</span>
-              <button
-                disabled={page * 20 >= total}
-                onClick={() => setPage((p) => p + 1)}
-                className="px-2 py-0.5 border border-line rounded disabled:opacity-40 hover:bg-[#F7F9FB]"
-              >
-                下一页
-              </button>
-            </div>
+            ) : (
+              <span>已全部加载</span>
+            )}
           </div>
         </aside>
 
@@ -313,6 +419,20 @@ export default function Inbox() {
                     </p>
                   </div>
                   <div className="shrink-0 flex items-center gap-2">
+                    <button
+                      disabled={!prevItem}
+                      onClick={() => prevItem && select(prevItem.id)}
+                      className="px-2.5 py-1 border border-line rounded text-[12px] text-sub hover:text-ink disabled:opacity-40 disabled:hover:text-sub"
+                    >
+                      ‹ 上一条
+                    </button>
+                    <button
+                      disabled={!nextItem}
+                      onClick={() => nextItem && select(nextItem.id)}
+                      className="px-2.5 py-1 border border-line rounded text-[12px] text-sub hover:text-ink disabled:opacity-40 disabled:hover:text-sub"
+                    >
+                      下一条 ›
+                    </button>
                     <RiskTag risk={conv.risk_level} />
                     <span className="px-2 py-0.5 rounded bg-[#EFF1F3] text-sub text-[11px]">
                       {CONV_STATUS_LABEL[conv.status] || conv.status}
@@ -339,6 +459,10 @@ export default function Inbox() {
               </div>
               <div className="flex-1 px-6 py-5 overflow-y-auto">
                 <Timeline items={conv.timeline} showCn={showCn} onRefresh={refresh} />
+                <ReplyDraftEditor items={conv.timeline} onChanged={refresh} />
+                <div className="mt-4">
+                  <ReplyEditor conversationId={conv.id} onSent={refresh} />
+                </div>
               </div>
             </>
           ) : null}

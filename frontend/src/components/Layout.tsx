@@ -18,9 +18,12 @@ export function Layout({ children }: { children: ReactNode }) {
     };
     fetchUnread();
     const timer = setInterval(fetchUnread, 15000);
+    const handleUnreadChanged = () => fetchUnread();
+    window.addEventListener("inbox:unread-changed", handleUnreadChanged);
     return () => {
       alive = false;
       clearInterval(timer);
+      window.removeEventListener("inbox:unread-changed", handleUnreadChanged);
     };
   }, []);
 
