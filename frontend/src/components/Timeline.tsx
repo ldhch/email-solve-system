@@ -42,6 +42,31 @@ const TYPE_LABEL: Record<string, string> = {
   attachment: "附件",
 };
 
+// A message's visual tone, so inbound emails, system replies and manual
+// replies are clearly distinguishable at a glance (white + accent bar vs
+// blue-tinted vs green-tinted card).
+type Tone = "email" | "system" | "manual";
+
+function toneOf(item: TimelineItem): Tone {
+  if (item.type === "reply") {
+    if (item.source === "manual") return "manual";
+    if (item.source === "system") return "system";
+  }
+  return "email";
+}
+
+const CARD_STYLE: Record<Tone, string> = {
+  email: "bg-white border border-line border-l-4 border-l-accent",
+  system: "bg-accent-tint border border-accent/15",
+  manual: "bg-risk-low-tint border border-risk-low/20",
+};
+
+const BADGE_STYLE: Record<Tone, string> = {
+  email: "bg-accent-tint text-accent",
+  system: "bg-accent text-white",
+  manual: "bg-risk-low text-white",
+};
+
 function typeLabel(item: TimelineItem): string {
   if (item.type === "reply") {
     if (item.source === "manual") return "人工回复";
@@ -114,142 +139,156 @@ export function Timeline({
   }
 
   return (
-    <ol className="divide-y divide-line">
-      {items.map((item, idx) => (
-        <li key={idx} className="py-4 first:pt-0 last:pb-0">
-          <div className="flex items-center gap-2 mb-1.5 text-[11.5px] text-sub">
-            <span className="font-medium text-ink">
-              {typeLabel(item)}
-            </span>
-            {item.status && (
-              <span
-                className={`px-1.5 py-0.5 rounded text-[11px] ${
-                  STATUS_STYLE[item.status] || "bg-[#EFF1F3] text-sub"
-                }`}
-              >
-                {STATUS_LABEL[item.status] || item.status}
-              </span>
-            )}
-            {item.reply_type && item.reply_type !== "general" && (
-              <span className="text-accent">{item.reply_type}</span>
-            )}
-            <span className="ml-auto tabular-nums">{formatLocal(item.at ?? null)}</span>
-          </div>
+    <ol className="space-y-3">
+      {items.map((item, idx) => {
+        const tone = toneOf(item);
+        return (
+          <li key={idx}>
+            <div className={`rounded-lg px-4 py-3 ${CARD_STYLE[tone]}`}>
+              <div className="mb-2 flex flex-wrap items-center gap-2 text-[11.5px] text-sub">
+                <span
+                  className={`px-2 py-0.5 rounded font-medium ${BADGE_STYLE[tone]}`}
+                >
+                  {typeLabel(item)}
+                </span>
+                {item.status && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[11px] ${
+                      STATUS_STYLE[item.status] || "bg-[#EFF1F3] text-sub"
+                    }`}
+                  >
+                    {STATUS_LABEL[item.status] || item.status}
+                  </span>
+                )}
+                {item.reply_type && item.reply_type !== "general" && (
+                  <span className="text-accent">{item.reply_type}</span>
+                )}
+                <span className="ml-auto tabular-nums">
+                  {formatLocal(item.at ?? null)}
+                </span>
+              </div>
 
-          {item.type === "email" &&
-            (showCn ? (
-              <div>
-                <div className="mb-1.5 flex items-center gap-1 text-[11px]">
-                  <button
-                    onClick={() =>
-                      setFullMode((prev) => {
-                        const next = new Set(prev);
-                        next.delete(item.email_id!);
-                        return next;
-                      })
-                    }
-                    className={`px-1.5 py-0.5 rounded transition-colors ${
-                      fullMode.has(item.email_id!)
-                        ? "text-sub hover:text-ink"
-                        : "bg-accent text-white font-medium"
-                    }`}
-                  >
-                    概括
-                  </button>
-                  <button
-                    onClick={() => showFull(item)}
-                    className={`px-1.5 py-0.5 rounded transition-colors ${
-                      fullMode.has(item.email_id!)
-                        ? "bg-accent text-white font-medium"
-                        : "text-sub hover:text-ink"
-                    }`}
-                  >
-                    全文
-                  </button>
-                </div>
-                {fullMode.has(item.email_id!) ? (
-                  translatingId === item.email_id &&
-                  !fullCn[item.email_id!] &&
-                  !item.content_cn ? (
-                    <div className="text-[13.5px] leading-relaxed text-sub">
-                      全文翻译中…
+              {item.type === "email" &&
+                (showCn ? (
+                  <div>
+                    <div className="mb-2 flex items-center gap-1 text-[12px]">
+                      <button
+                        onClick={() =>
+                          setFullMode((prev) => {
+                            const next = new Set(prev);
+                            next.delete(item.email_id!);
+                            return next;
+                          })
+                        }
+                        className={`px-2 py-0.5 rounded transition-colors ${
+                          fullMode.has(item.email_id!)
+                            ? "text-sub hover:text-ink"
+                            : "bg-accent text-white font-medium"
+                        }`}
+                      >
+                        概括
+                      </button>
+                      <button
+                        onClick={() => showFull(item)}
+                        className={`px-2 py-0.5 rounded transition-colors ${
+                          fullMode.has(item.email_id!)
+                            ? "bg-accent text-white font-medium"
+                            : "text-sub hover:text-ink"
+                        }`}
+                      >
+                        全文
+                      </button>
                     </div>
-                  ) : (
-                    <div className="text-[13.5px] leading-normal whitespace-pre-wrap text-ink">
-                      {normalizeSpacing(
-                        fullCn[item.email_id!] ?? item.content_cn ?? item.content,
-                      )}
-                    </div>
-                  )
-                ) : (
-                  <div className="text-[13.5px] leading-normal whitespace-pre-wrap text-ink">
-                    {item.summary_cn || normalizeSpacing(item.content)}
+                    {fullMode.has(item.email_id!) ? (
+                      translatingId === item.email_id &&
+                      !fullCn[item.email_id!] &&
+                      !item.content_cn ? (
+                        <div className="text-[15px] leading-normal text-sub">
+                          全文翻译中…
+                        </div>
+                      ) : (
+                        <div className="text-[15px] leading-normal whitespace-pre-wrap text-ink">
+                          {normalizeSpacing(
+                            fullCn[item.email_id!] ?? item.content_cn ?? item.content,
+                          )}
+                        </div>
+                      )
+                    ) : (
+                      <div className="text-[15px] leading-normal whitespace-pre-wrap text-ink">
+                        {item.summary_cn || normalizeSpacing(item.content)}
+                      </div>
+                    )}
+                    {translateErrors[item.email_id!] && (
+                      <p className="mt-1 text-[12px] text-risk-high">
+                        {translateErrors[item.email_id!]}
+                      </p>
+                    )}
                   </div>
-                )}
-                {translateErrors[item.email_id!] && (
-                  <p className="mt-1 text-[12px] text-risk-high">
-                    {translateErrors[item.email_id!]}
-                  </p>
-                )}
-              </div>
-            ) : (
-              <div className="text-[13.5px] leading-[1.75] whitespace-pre-wrap text-ink">
-                {normalizeSpacing(item.content)}
-              </div>
-            ))}
+                ) : (
+                  <div className="text-[15px] leading-[1.75] whitespace-pre-wrap text-ink">
+                    {normalizeSpacing(item.content)}
+                  </div>
+                ))}
 
-          {item.type === "reply" && (
-            <div>
-              <div
-                className={`text-[13.5px] whitespace-pre-wrap text-ink ${
-                  showCn && item.content_cn ? "leading-normal" : "leading-[1.75]"
-                }`}
-              >
-                {showCn && item.content_cn ? item.content_cn : item.content_en}
-              </div>
-              {item.status === "pending_review" && item.reply_id && (
-                <div className="mt-3 flex gap-2">
-                  <button
-                    onClick={() => approve(item.reply_id!)}
-                    className="px-3 py-1.5 bg-accent text-white rounded text-[12px] font-medium hover:bg-accent/90"
+              {item.type === "reply" && (
+                <div>
+                  <div
+                    className={`text-[15px] whitespace-pre-wrap text-ink ${
+                      showCn && item.content_cn
+                        ? "leading-normal"
+                        : "leading-[1.75]"
+                    }`}
                   >
-                    审核通过并发送
-                  </button>
-                  <button
-                    onClick={() => reject(item.reply_id!)}
-                    className="px-3 py-1.5 border border-line text-sub rounded text-[12px] hover:text-ink hover:bg-[#F7F9FB]"
+                    {showCn && item.content_cn
+                      ? item.content_cn
+                      : item.content_en}
+                  </div>
+                  {item.status === "pending_review" && item.reply_id && (
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        onClick={() => approve(item.reply_id!)}
+                        className="px-3 py-1.5 bg-accent text-white rounded text-[12px] font-medium hover:bg-accent/90"
+                      >
+                        审核通过并发送
+                      </button>
+                      <button
+                        onClick={() => reject(item.reply_id!)}
+                        className="px-3 py-1.5 border border-line text-sub rounded text-[12px] hover:text-ink hover:bg-[#F7F9FB]"
+                      >
+                        驳回为草稿
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {item.type === "attachment" && (
+                <div className="flex flex-col gap-2">
+                  {item.content_type?.startsWith("image/") &&
+                    item.attachment_id && (
+                      <img
+                        src={`/api/v1/attachments/${item.attachment_id}`}
+                        alt={item.filename}
+                        className="max-h-64 rounded border border-line"
+                      />
+                    )}
+                  <a
+                    href={`/api/v1/attachments/${item.attachment_id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[13.5px] text-accent underline"
                   >
-                    驳回为草稿
-                  </button>
+                    📎 {item.filename}
+                    {typeof item.size_bytes === "number"
+                      ? `（${(item.size_bytes / 1024).toFixed(0)} KB）`
+                      : ""}
+                  </a>
                 </div>
               )}
             </div>
-          )}
-
-          {item.type === "attachment" && (
-            <div className="flex flex-col gap-2">
-              {item.content_type?.startsWith("image/") && item.attachment_id && (
-                <img
-                  src={`/api/v1/attachments/${item.attachment_id}`}
-                  alt={item.filename}
-                  className="max-h-64 rounded border border-line"
-                />
-              )}
-              <a
-                href={`/api/v1/attachments/${item.attachment_id}`}
-                target="_blank"
-                rel="noreferrer"
-                className="text-[13px] text-accent underline"
-              >
-                📎 {item.filename}
-                {typeof item.size_bytes === "number"
-                  ? `（${(item.size_bytes / 1024).toFixed(0)} KB）`
-                  : ""}
-              </a>
-            </div>
-          )}
-        </li>
-      ))}
+          </li>
+        );
+      })}
     </ol>
   );
 }
