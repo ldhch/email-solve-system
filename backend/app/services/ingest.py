@@ -376,12 +376,6 @@ class IngestService:
             log_action(self.db, "duplicate_skipped", "email", existing.id)
             return ProcessingResult(message_id=parsed.message_id, action="duplicate")
 
-        state = self.db.get(SystemState, 1)
-        if state is not None and state.ai_paused:
-            log_action(self.db, "paused_skipped", "email", 0)
-            logger.info("System paused; email %s fetched but not processed", parsed.message_id)
-            return ProcessingResult(message_id=parsed.message_id, action="paused")
-
         merged = self.conversations.merge(parsed)
         conversation = merged.conversation
 
@@ -451,7 +445,52 @@ class IngestService:
                 category=classification.category,
             )
 
-        # Phase 3 routing (TECH 九 Phase 3):
+        # Emergency pause (M-19): the mail is already ingested (visible + unread
+        # in the inbox) but no reply is generated or sent. The flag makes
+        # `_process_pending_after_pause` re-route it in received order after the
+        # boss resumes, and it is marked SEEN so the poll never re-fetches it.
+        state = self.db.get(SystemState, 1)
+        if state is not None and state.ai_paused:
+            email_row.pending_after_pause = True
+            log_action(self.db, "paused_skipped", "email", email_row.id, actor_id=None)
+            logger.info(
+                "System paused; email %s ingested and queued (pending_after_pause)",
+                parsed.message_id,
+            )
+            return ProcessingResult(
+                message_id=parsed.message_id,
+                action="paused",
+                email_id=email_row.id,
+                conversation_id=conversation.id,
+                risk_level=classification.risk_level,
+                category=classification.category,
+            )
+
+        return self._route_email(
+            parsed,
+            email_row,
+            conversation,
+            classification,
+            auto_send_mode=auto_send_mode,
+            conversation_created=merged.created,
+        )
+
+    def _route_email(
+        self,
+        parsed,
+        email_row,
+        conversation,
+        classification,
+        *,
+        auto_send_mode: str = "send",
+        conversation_created: bool = False,
+    ) -> ProcessingResult:
+        """Phase 3 routing (TECH 九 Phase 3): pick one reply action per mail.
+
+        Shared by the normal pipeline and `_process_pending_after_pause`, which
+        re-routes emails ingested while the system was emergency-paused.
+        """
+
         #   high   -> reassurance email + auto-created ticket with 24h SLA
         #             (chargeback was already forced to high by the classifier
         #             and never enters retention)
@@ -477,7 +516,7 @@ class IngestService:
                     email_row,
                     conversation,
                     classification,
-                    conversation_created=merged.created,
+                    conversation_created=conversation_created,
                 )
             return self._auto_send(parsed, email_row, conversation, classification)
         return self._manual(parsed, email_row, conversation, classification)
@@ -889,10 +928,165 @@ class IngestService:
                 )
             )
 
+    # ---------- resume-after-pause backlog (M-19) ----------
+
+    def _process_pending_after_pause(self) -> dict[str, int]:
+        """Re-route emails ingested while the system was paused, oldest first.
+
+        Called at the top of every poll while NOT paused. Failed sends retry
+        their existing draft (no regeneration); everything else re-enters Phase 3
+        routing. Low-risk auto-sends aggregate per conversation exactly like a
+        normal poll, so the backlog is answered in received order.
+        """
+
+        summary = {
+            key: 0
+            for key in (
+                "auto_sent",
+                "reassured",
+                "review",
+                "manual",
+                "paused",
+                "duplicate",
+                "silenced",
+                "failed",
+                "followup",
+            )
+        }
+        state = self.db.get(SystemState, 1)
+        if state is not None and state.ai_paused:
+            return summary
+        pending = self.db.execute(
+            select(Email)
+            .where(Email.pending_after_pause.is_(True))
+            .order_by(Email.received_at.asc(), Email.id.asc())
+        ).scalars().all()
+        if not pending:
+            return summary
+        logger.info("Resuming %s paused email(s) in received order", len(pending))
+        pending_groups: dict[int, list[ProcessingResult]] = {}
+        for email in pending:
+            conversation = self.db.get(Conversation, email.conversation_id)
+            if conversation is None:
+                email.pending_after_pause = False  # orphaned row: drop the flag
+                continue
+            resend = self._resend_failed_reply(email)
+            if resend is not None:
+                if resend.action == "auto_sent":
+                    email.pending_after_pause = False
+                summary[resend.action] = summary.get(resend.action, 0) + 1
+                continue
+            classification = self._classification_from_email(email)
+            parsed = ParsedEmail(
+                message_id=email.message_id,
+                subject=email.subject,
+                from_email=email.from_email,
+                from_name=None,
+                to_email=email.to_email,
+                body_text=email.body_text,
+                body_html=email.body_html,
+                received_at=email.received_at,
+                in_reply_to=email.in_reply_to,
+            )
+            result = self._route_email(
+                parsed,
+                email,
+                conversation,
+                classification,
+                auto_send_mode="defer",
+                conversation_created=False,
+            )
+            if result.action == "pending_auto":
+                pending_groups.setdefault(result.conversation_id or 0, []).append(
+                    result
+                )
+                continue
+            if result.action in (
+                "auto_sent",
+                "reassured",
+                "review",
+                "manual",
+                "silenced",
+                "followup",
+            ):
+                email.pending_after_pause = False
+            if result.action in summary:
+                summary[result.action] += 1
+        for conversation_id, results in pending_groups.items():
+            outcome, _keep_unseen_uid = self._send_aggregated_group(
+                conversation_id, results, remove_on_generation_failure=False
+            )
+            if outcome == "sent":
+                summary["auto_sent"] += 1
+                self._set_pending_flag(results, False)
+            elif outcome == "smtp_failed":
+                # Only the newest batch email stays queued; the next round
+                # re-sends its failed reply instead of regenerating.
+                summary["failed"] += 1
+                self._set_pending_flag(results, False)
+                latest = self._latest_of(results)
+                if latest is not None:
+                    latest.pending_after_pause = True
+            else:  # generation_failed: keep every batch email queued for retry
+                summary["failed"] += 1
+        self.db.commit()
+        return summary
+
+    def _classification_from_email(self, email: Email) -> Classification:
+        """Rebuild the classification for an already-ingested email.
+
+        Reuses the pause-time classification when present; otherwise re-runs the
+        classifier (covers rows where classification failed before persisting).
+        """
+
+        if email.risk_level:
+            return Classification(
+                risk_level=email.risk_level,
+                confidence=email.confidence or 0.0,
+                category=email.category or "",
+                chargeback_risk=False,
+                summary_cn=email.summary_cn or "",
+            )
+        parsed = ParsedEmail(
+            message_id=email.message_id,
+            subject=email.subject,
+            from_email=email.from_email,
+            from_name=None,
+            to_email=email.to_email,
+            body_text=email.body_text,
+            body_html=email.body_html,
+            received_at=email.received_at,
+            in_reply_to=email.in_reply_to,
+        )
+        classification = self.classifier.classify(parsed)
+        email.risk_level = classification.risk_level
+        email.confidence = classification.confidence
+        email.category = classification.category
+        email.summary_cn = classification.summary_cn
+        return classification
+
+    def _emails_of(self, results: list[ProcessingResult]) -> list[Email]:
+        emails = [
+            self.db.get(Email, r.email_id) for r in results if r.email_id is not None
+        ]
+        return [e for e in emails if e is not None]
+
+    def _latest_of(self, results: list[ProcessingResult]) -> Email | None:
+        emails = self._emails_of(results)
+        return max(emails, key=lambda e: (e.received_at, e.id)) if emails else None
+
+    def _set_pending_flag(self, results: list[ProcessingResult], value: bool) -> None:
+        for email in self._emails_of(results):
+            email.pending_after_pause = value
+
     # ---------- aggregated auto-send (PRD F2 / edge case 3) ----------
 
     def _send_aggregated_group(
-        self, conversation_id: int, results: list[ProcessingResult]
+        self,
+        conversation_id: int,
+        results: list[ProcessingResult],
+        *,
+        remove_on_generation_failure: bool = True,
     ) -> tuple[str, str | None]:
         """Send ONE aggregated reply covering a conversation's pending batch.
 
@@ -930,7 +1124,10 @@ class IngestService:
                 conversation_id,
                 exc,
             )
-            self._remove_ingested_batch(results)
+            # Resume-backlog batches must NOT be deleted: those email rows were
+            # ingested while paused and stay queued for a retry instead.
+            if remove_on_generation_failure:
+                self._remove_ingested_batch(results)
             log_action(
                 self.db,
                 "aggregate_reply_failed",
@@ -1040,9 +1237,8 @@ class IngestService:
         conn = self.imap
         try:
             conn = self.imap or self._connect()
-            items = self.fetch_unseen(conn)
             summary = {
-                "fetched": len(items),
+                "fetched": 0,
                 "auto_sent": 0,
                 "reassured": 0,
                 "review": 0,
@@ -1053,6 +1249,13 @@ class IngestService:
                 "failed": 0,
                 "followup": 0,
             }
+            # Backlog first: emails ingested while paused are re-routed in
+            # received order, then fresh UNSEEN mail is processed (M-19).
+            pending_summary = self._process_pending_after_pause()
+            for key, value in pending_summary.items():
+                summary[key] += value
+            items = self.fetch_unseen(conn)
+            summary["fetched"] = len(items)
             pending_groups: dict[int, list[ProcessingResult]] = {}
             for uid, raw in items:
                 try:
@@ -1072,7 +1275,8 @@ class IngestService:
                 if result.action in summary:
                     summary[result.action] += 1
                 # Persisted emails are marked SEEN so they are not re-fetched.
-                # Paused/failed emails stay UNSEEN and are processed after resume/retry.
+                # Paused emails are already ingested and re-routed from the DB
+                # backlog after resume; failed emails stay UNSEEN and retried.
                 if result.action in (
                     "auto_sent",
                     "reassured",
@@ -1080,6 +1284,7 @@ class IngestService:
                     "manual",
                     "silenced",
                     "followup",
+                    "paused",
                 ):
                     self.mark_seen(conn, uid)
             # Phase 2: one aggregated reply per conversation (synchronous).

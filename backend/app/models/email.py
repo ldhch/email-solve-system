@@ -32,6 +32,12 @@ class Email(Base):
     is_inbound: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     has_attachments: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    # Set while the system is emergency-paused: the mail is ingested (visible
+    # in the inbox) but no reply was produced. `_process_pending_after_pause`
+    # clears it after routing resumes, in received order (M-19).
+    pending_after_pause: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, index=True
+    )
     received_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
 
     conversation = relationship("Conversation", back_populates="emails")

@@ -386,7 +386,7 @@ def test_generation_failure_rolls_back_and_can_retry(
     assert imap.seen == ["6"]
 
 
-def test_paused_system_fetches_but_does_not_process(
+def test_paused_system_ingests_but_does_not_reply(
     db, settings, fake_smtp_class, fake_imap
 ) -> None:
     state = db.get(SystemState, 1)
@@ -398,10 +398,45 @@ def test_paused_system_fetches_but_does_not_process(
     summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
 
     assert summary["paused"] == 1
-    assert db.execute(select(Email)).scalars().all() == []
-    assert imap.seen == []  # stays UNSEEN, processed after resume
+    email = db.execute(select(Email)).scalar_one()
+    assert email.message_id == "paused-1@example.com"
+    assert email.pending_after_pause is True
+    assert email.is_read is False  # shows as unread in the inbox
+    assert imap.seen == ["9"]  # consumed; resumed from the DB backlog, not IMAP
+    assert db.execute(select(Reply)).scalars().all() == []
     actions = {a.action for a in db.execute(select(AuditLog)).scalars().all()}
     assert "paused_skipped" in actions
+
+
+def test_resume_reprocesses_paused_backlog(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    state = db.get(SystemState, 1)
+    state.ai_paused = True
+    db.commit()
+
+    raw = make_raw_email(
+        subject="Product size question",
+        message_id="<paused-1@example.com>",
+    )
+    imap = fake_imap([("9", raw)])
+    service = _service(db, settings, imap, FakeSMTP)
+
+    first = service.fetch_and_process()
+    assert first["paused"] == 1
+    email = db.execute(select(Email)).scalar_one()
+    assert email.pending_after_pause is True
+
+    # Resume: the next poll re-routes the queued mail (low-risk -> auto-send).
+    state.ai_paused = False
+    db.commit()
+    second = service.fetch_and_process()
+    assert second["auto_sent"] == 1
+    assert second["fetched"] == 0  # already consumed; no fresh UNSEEN mail
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.status == "sent"
+    db.refresh(email)
+    assert email.pending_after_pause is False
 
 
 def test_send_failure_marks_reply_failed_and_keeps_email_unseen(

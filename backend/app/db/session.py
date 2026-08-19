@@ -123,6 +123,20 @@ def _ensure_email_is_read_column(engine: Engine) -> None:
             )
 
 
+def _ensure_email_pending_after_pause_column(engine: Engine) -> None:
+    """Add ``emails.pending_after_pause`` to DBs created before the column existed."""
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(emails)"))}
+        if "pending_after_pause" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE emails "
+                    "ADD COLUMN pending_after_pause BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
+
+
 def init_db(settings: Settings | None = None) -> None:
     """Create all tables (create_all) and seed defaults. No migrations."""
 
@@ -134,6 +148,7 @@ def init_db(settings: Settings | None = None) -> None:
     engine = get_engine(settings)
     Base.metadata.create_all(bind=engine)
     _ensure_email_is_read_column(engine)
+    _ensure_email_pending_after_pause_column(engine)
     seed(settings)
 
 
