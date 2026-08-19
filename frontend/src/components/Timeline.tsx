@@ -106,6 +106,9 @@ export function Timeline({
   const [translateErrors, setTranslateErrors] = useState<Record<number, string>>(
     {},
   );
+  // Long threads: keep the two oldest and three newest messages open, fold the
+  // rest behind a "show more" bar so a 10+ message thread stays scannable.
+  const [folded, setFolded] = useState(true);
 
   async function showFull(item: TimelineItem) {
     const id = item.email_id!;
@@ -138,9 +141,46 @@ export function Timeline({
     onRefresh();
   }
 
+  // Fold layout: oldest TOP_VISIBLE messages stay open, middle ones collapse
+  // behind a bar, newest BOTTOM_VISIBLE stay open (draft editor sits after).
+  const TOP_VISIBLE = 2;
+  const BOTTOM_VISIBLE = 3;
+  const total = items.length;
+  const foldable = total > TOP_VISIBLE + BOTTOM_VISIBLE;
+  const midStart = TOP_VISIBLE;
+  const midEnd = total - BOTTOM_VISIBLE;
+  const midCount = foldable ? midEnd - midStart : 0;
+  const midFrom = foldable
+    ? formatLocal(items[midStart].at ?? null).slice(0, 5)
+    : "";
+  const midTo = foldable
+    ? formatLocal(items[midEnd - 1].at ?? null).slice(0, 5)
+    : "";
+  const midRange = midFrom && midTo ? `${midFrom} – ${midTo}` : "";
+
   return (
     <ol className="space-y-3">
       {items.map((item, idx) => {
+        // Folded middle section: render one "show more" bar in place of the
+        // middle messages, skip the rest until expanded.
+        if (foldable && folded && idx >= midStart && idx < midEnd) {
+          if (idx === midStart) {
+            return (
+              <li key={`fold:${idx}`}>
+                <button
+                  onClick={() => setFolded(false)}
+                  className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-line bg-[#F1F3F5] px-4 py-2.5 text-[12.5px] text-sub transition-colors hover:bg-[#EAEDF0] hover:text-ink"
+                >
+                  <span className="font-medium text-accent">▸</span>
+                  <span>还有 {midCount} 条中间消息</span>
+                  {midRange && <span>{midRange}</span>}
+                  <span className="font-medium text-accent">点击展开</span>
+                </button>
+              </li>
+            );
+          }
+          return null;
+        }
         const tone = toneOf(item);
         return (
           <li key={idx}>
