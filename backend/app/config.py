@@ -114,9 +114,12 @@ class Settings(BaseSettings):
     smtp_rate_limit_per_hour: int = 0  # 0 = disabled
     imap_timeout: int = 30
     smtp_timeout: int = 30
+    # Mailbox folder where a copy of every outbound reply is stored via IMAP
+    # APPEND (Titan's SMTP does not auto-save sent copies). Empty = disabled.
+    imap_sent_folder: str = "Sent"
 
-    # Paths
-    attachment_dir: str = "data/attachments"
+    # Paths (empty default => derived from DATA_DIR by _derive_paths_from_data_dir)
+    attachment_dir: str = ""
 
     # Optional chargeback keyword override (comma separated)
     chargeback_keywords: str = ""

@@ -32,6 +32,9 @@ def settings() -> Settings:
         compensation_max_usd=20.0,
         attachment_dir="/tmp/shouhou-agent-test-attachments",
         return_policy_text="Return address: 123 Test Street, return within 30 days.",
+        # Disable IMAP sent-copy in unit tests by default (no real mailbox);
+        # the append path is covered by a dedicated test with a fake IMAP.
+        imap_sent_folder="",
     )
 
 
@@ -152,6 +155,37 @@ def fake_imap():
         return FakeIMAP(items)
 
     return _make
+
+
+class FakeIMAPAppend:
+    """In-memory IMAP that records APPENDs made by MailerService._append_sent_copy."""
+
+    instances: list["FakeIMAPAppend"] = []
+    fail_append = False
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.instances = []
+        cls.fail_append = False
+
+    def __init__(self, host: str, port: int, timeout: int | None = None) -> None:
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.append_calls: list[tuple[str, bytes]] = []
+        FakeIMAPAppend.instances.append(self)
+
+    def login(self, username: str, password: str) -> None:
+        self.username = username
+
+    def append(self, folder: str, flags: str, date, raw: bytes) -> tuple[str, list]:
+        if FakeIMAPAppend.fail_append:
+            raise ConnectionError("simulated IMAP APPEND failure")
+        self.append_calls.append((folder, raw))
+        return ("OK", [None])
+
+    def logout(self) -> None:
+        pass
 
 
 def make_raw_email(

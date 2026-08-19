@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -108,6 +108,21 @@ def seed(settings: Settings | None = None) -> None:
         db.commit()
 
 
+def _ensure_email_is_read_column(engine: Engine) -> None:
+    """Add ``emails.is_read`` to DBs created before the column existed.
+
+    ``create_all`` only creates missing tables, never missing columns; a
+    guarded ALTER TABLE backfills the new column on existing installs.
+    """
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(emails)"))}
+        if "is_read" not in cols:
+            conn.execute(
+                text("ALTER TABLE emails ADD COLUMN is_read BOOLEAN NOT NULL DEFAULT 0")
+            )
+
+
 def init_db(settings: Settings | None = None) -> None:
     """Create all tables (create_all) and seed defaults. No migrations."""
 
@@ -116,7 +131,9 @@ def init_db(settings: Settings | None = None) -> None:
     # Importing the models package registers every model on Base.metadata.
     from app import models  # noqa: F401
 
-    Base.metadata.create_all(bind=get_engine(settings))
+    engine = get_engine(settings)
+    Base.metadata.create_all(bind=engine)
+    _ensure_email_is_read_column(engine)
     seed(settings)
 
 

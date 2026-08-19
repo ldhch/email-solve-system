@@ -16,6 +16,18 @@ interface NotificationStatus {
   alert_email_masked: string | null;
 }
 
+/** Human-friendly uptime, e.g. "35 秒" / "12 分钟" / "2 小时 5 分钟" / "3 天 4 小时". */
+function fmtUptime(sec: number): string {
+  if (sec < 60) return `${sec} 秒`;
+  const totalMin = Math.floor(sec / 60);
+  if (totalMin < 60) return `${totalMin} 分钟`;
+  const hours = Math.floor(totalMin / 60);
+  const minutes = totalMin % 60;
+  if (hours < 24) return `${hours} 小时 ${minutes} 分钟`;
+  const days = Math.floor(hours / 24);
+  return `${days} 天 ${hours % 24} 小时`;
+}
+
 export default function Settings() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [notifications, setNotifications] = useState<NotificationStatus | null>(
@@ -42,19 +54,24 @@ export default function Settings() {
     load();
   }, [load]);
 
-  async function togglePause() {
+  async function setMode(mode: "running" | "paused") {
     if (!status) return;
+    if (
+      (mode === "running" && !status.ai_paused) ||
+      (mode === "paused" && status.ai_paused)
+    ) {
+      return; // already in this mode
+    }
     setBusy(true);
     setError("");
     setSuccess("");
     try {
-      if (status.ai_paused) {
-        await http.post("/system/resume");
-        setSuccess("已恢复 AI 自动回复");
+      if (mode === "paused") {
+        await http.post("/system/pause", { reason: "" });
+        setSuccess("已暂停：新邮件只拉取、不自动回复");
       } else {
-        const reason = window.prompt("请输入暂停原因（可选）：") ?? "";
-        await http.post("/system/pause", { reason });
-        setSuccess("已暂停 AI 自动回复（新邮件只拉取不处理）");
+        await http.post("/system/resume");
+        setSuccess("已恢复自动回复");
       }
       await load();
     } catch (err) {
@@ -73,42 +90,54 @@ export default function Settings() {
       <div className="grid gap-4 md:grid-cols-2">
         <section className="bg-white rounded-lg border border-gray-200 p-4">
           <h2 className="font-semibold mb-3">紧急暂停开关</h2>
-          <p className="text-sm text-gray-600 mb-3">
+          <p className="text-sm text-gray-600 mb-4">
             暂停后新邮件仅拉取入库、不自动回复；恢复后按时间顺序补处理积压邮件。
           </p>
-          <div className="flex items-center gap-3">
-            <span
-              className={`px-3 py-1 rounded text-sm ${
-                status?.ai_paused
-                  ? "bg-red-100 text-red-700"
-                  : "bg-green-100 text-green-700"
-              }`}
-            >
-              {status?.ai_paused ? "已暂停" : "运行中"}
-            </span>
+
+          {/* Mode toggle: active segment = blue, inactive = white */}
+          <div className="flex rounded-lg border border-gray-300 overflow-hidden w-72">
             <button
-              onClick={togglePause}
+              type="button"
+              onClick={() => setMode("running")}
               disabled={busy}
-              className={`px-4 py-2 rounded text-sm text-white disabled:opacity-50 ${
-                status?.ai_paused
-                  ? "bg-green-600 hover:bg-green-700"
-                  : "bg-red-600 hover:bg-red-700"
+              className={`flex-1 py-2 text-sm font-medium transition-colors disabled:opacity-50 ${
+                status && !status.ai_paused
+                  ? "bg-blue-600 text-white"
+                  : "bg-white text-gray-600 hover:bg-blue-50"
               }`}
             >
-              {status?.ai_paused ? "恢复自动回复" : "暂停自动回复"}
+              运行中
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("paused")}
+              disabled={busy}
+              className={`flex-1 py-2 text-sm font-medium transition-colors border-l border-gray-300 disabled:opacity-50 ${
+                status?.ai_paused
+                  ? "bg-blue-600 text-white"
+                  : "bg-white text-gray-600 hover:bg-blue-50"
+              }`}
+            >
+              已暂停
             </button>
           </div>
-          {status?.paused_reason && (
-            <p className="text-xs text-gray-500 mt-3">暂停原因：{status.paused_reason}</p>
-          )}
+
+          <p className="text-xs text-gray-500 mt-3">
+            当前状态：
+            {status?.ai_paused ? (
+              <span className="text-red-600 font-medium">已暂停</span>
+            ) : (
+              <span className="text-green-600 font-medium">运行中</span>
+            )}
+            {status?.paused_reason && ` · 原因：${status.paused_reason}`}
+          </p>
           {status?.paused_at && (
             <p className="text-xs text-gray-500 mt-1">
               暂停时间：{status.paused_at.replace("T", " ").replace("Z", "")}
             </p>
           )}
           <p className="text-xs text-gray-400 mt-3">
-            已运行 {Math.floor((status?.uptime_sec ?? 0) / 3600)} 小时
-            {Math.floor(((status?.uptime_sec ?? 0) % 3600) / 60)} 分钟
+            服务进程已运行 {fmtUptime(status?.uptime_sec ?? 0)}
           </p>
         </section>
 

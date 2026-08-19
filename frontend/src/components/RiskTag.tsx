@@ -1,8 +1,8 @@
 const STYLES: Record<string, string> = {
-  high: "bg-red-100 text-red-700",
-  medium: "bg-yellow-100 text-yellow-700",
-  low: "bg-green-100 text-green-700",
-  unknown: "bg-gray-100 text-gray-600",
+  high: "bg-risk-high-tint text-risk-high",
+  medium: "bg-risk-medium-tint text-risk-medium",
+  low: "bg-risk-low-tint text-risk-low",
+  unknown: "bg-[#EFF1F3] text-sub",
 };
 
 const LABELS: Record<string, string> = {
@@ -16,7 +16,7 @@ export function RiskTag({ risk }: { risk?: string | null }) {
   const key = risk && STYLES[risk] ? risk : "unknown";
   return (
     <span
-      className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${STYLES[key]}`}
+      className={`inline-block px-1.5 py-0.5 rounded text-[11px] font-medium ${STYLES[key]}`}
     >
       {LABELS[key]}
     </span>

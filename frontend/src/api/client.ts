@@ -55,6 +55,16 @@ export function errorText(err: unknown): string {
       return "文件超过 20MB 上限";
     case "EMPTY_CONTENT":
       return "未能从文件中提取到文本";
+    case "NOTHING_TO_SPLIT":
+      return "该会话邮件不足，无法拆分";
+    case "EMAIL_NOT_IN_CONVERSATION":
+      return "所选邮件不在当前会话";
+    case "SAME_CONVERSATION":
+      return "不能合并到当前会话自身";
+    case "DIFFERENT_CUSTOMER":
+      return "两个会话不是同一客户，无法合并";
+    case "NOT_FOUND":
+      return "资源不存在";
     default:
       return "操作失败，请重试";
   }

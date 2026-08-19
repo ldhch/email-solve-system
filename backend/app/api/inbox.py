@@ -1,4 +1,9 @@
-"""Inbox + attachment APIs (M-15, TECH 5.2)."""
+"""Inbox + attachment APIs (M-15, TECH 5.2).
+
+The inbox list is conversation-level: emails from the same customer that belong
+to one conversation are folded into a single row showing the latest activity,
+so the owner scans one thread at a time instead of one email at a time.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +11,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_owner
@@ -14,29 +19,138 @@ from app.api.common import get_settings_dependency, ok
 from app.config import Settings
 from app.db.session import get_db
 from app.models.attachment import Attachment
+from app.models.conversation import Conversation
+from app.models.customer import Customer
 from app.models.email import Email
 from app.models.reply import Reply
 
 router = APIRouter(prefix="/api/v1", tags=["inbox"])
+
+_RISK_ORDER = {"high": 3, "medium": 2, "low": 1}
 
 
 def _fmt(dt) -> str | None:
     return dt.isoformat(timespec="seconds") + "Z" if dt else None
 
 
-def _latest_reply_status(db: Session) -> dict[int, str]:
-    """Map email_id -> status of its newest reply (SQLite-friendly)."""
+def _latest_reply_per_conversation(db: Session) -> dict[int, Reply]:
+    """Map conversation_id -> newest non-deleted reply (SQLite-friendly)."""
 
     rows = db.execute(
-        select(Reply.email_id, func.max(Reply.id).label("max_id")).group_by(Reply.email_id)
+        select(Reply.conversation_id, func.max(Reply.id).label("max_id"))
+        .where(Reply.is_deleted.is_(False))
+        .group_by(Reply.conversation_id)
     ).all()
     if not rows:
         return {}
     ids = [row.max_id for row in rows]
-    status_map = dict(
-        db.execute(select(Reply.id, Reply.status).where(Reply.id.in_(ids))).all()
-    )
-    return {row.email_id: status_map[row.max_id] for row in rows}
+    replies = db.execute(select(Reply).where(Reply.id.in_(ids))).scalars().all()
+    return {r.conversation_id: r for r in replies}
+
+
+def _conversation_rows(
+    db: Session,
+    *,
+    risk_level: str | None,
+    status: str | None,
+    keyword: str | None,
+) -> list[dict]:
+    """Fold emails into one row per conversation.
+
+    Data volume is small (tens of emails/day), so aggregation happens in Python
+    after a single email scan — the same approach the previous email-level
+    inbox used for filtering and pagination.
+    """
+
+    emails = db.execute(
+        select(Email).order_by(Email.conversation_id, Email.received_at)
+    ).scalars().all()
+    conv_emails: dict[int, list[Email]] = {}
+    for e in emails:
+        conv_emails.setdefault(e.conversation_id, []).append(e)
+
+    latest_replies = _latest_reply_per_conversation(db)
+
+    conversations = {
+        c.id: c
+        for c in db.execute(
+            select(Conversation).where(Conversation.id.in_(conv_emails))
+        ).scalars()
+    }
+    customers = {
+        c.id: c
+        for c in db.execute(
+            select(Customer).where(
+                Customer.id.in_([conversations[cid].customer_id for cid in conversations])
+            )
+        ).scalars()
+    }
+
+    rows: list[dict] = []
+    for cid, e_list in conv_emails.items():
+        conv = conversations[cid]
+        customer = customers.get(conv.customer_id)
+        latest_email = e_list[-1]  # ordered by received_at asc
+        reply = latest_replies.get(cid)
+
+        # Highest risk seen in the thread wins, so an early high-risk email is
+        # never hidden by later low-key follow-ups.
+        risk = max(
+            (e.risk_level for e in e_list if e.risk_level in _RISK_ORDER),
+            key=lambda r: _RISK_ORDER[r],
+            default=None,
+        ) or conv.risk_level
+
+        unread = sum(1 for e in e_list if not e.is_read)
+        reply_ts = (reply.sent_at or reply.created_at) if reply else None
+        email_ts = latest_email.received_at
+
+        # Summary = content of the most recent activity (inbound or outbound).
+        if reply_ts is not None and reply_ts >= email_ts:
+            summary = reply.content_cn or reply.content_en or latest_email.summary_cn
+            latest_status = reply.status
+            latest_at = reply_ts
+        else:
+            summary = (
+                latest_email.summary_cn
+                or latest_email.body_text
+                or latest_email.subject
+            )
+            latest_status = reply.status if reply else None
+            latest_at = email_ts
+
+        if keyword:
+            kw = keyword.lower()
+            if not any(
+                kw in (e.subject or "").lower()
+                or kw in (e.from_email or "").lower()
+                or (e.summary_cn and kw in e.summary_cn.lower())
+                for e in e_list
+            ) and not (customer and kw in (customer.email or "").lower()):
+                continue
+        if risk_level and risk != risk_level:
+            continue
+        if status and latest_status != status:
+            continue
+
+        rows.append(
+            {
+                "id": cid,
+                "subject": latest_email.subject,
+                "from_email": latest_email.from_email,
+                "customer_name": customer.display_name if customer else None,
+                "email_count": len(e_list),
+                "unread_count": unread,
+                "risk_level": risk,
+                "summary_cn": summary,
+                "latest_status": latest_status,
+                "latest_at": _fmt(latest_at),
+                "is_read": unread == 0,
+            }
+        )
+
+    rows.sort(key=lambda r: r["latest_at"] or "", reverse=True)
+    return rows
 
 
 @router.get("/inbox")
@@ -49,47 +163,59 @@ async def list_inbox(
     _user=Depends(require_owner),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Paginated email list with risk filter and latest-reply status filter."""
+    """Conversation-level inbox list with risk/status/keyword filters."""
 
-    filters = []
-    if risk_level:
-        filters.append(Email.risk_level == risk_level)
-    if keyword:
-        like = f"%{keyword}%"
-        filters.append(
-            or_(
-                Email.subject.ilike(like),
-                Email.from_email.ilike(like),
-                Email.summary_cn.ilike(like),
-            )
-        )
-
-    emails = db.execute(
-        select(Email).where(*filters).order_by(Email.received_at.desc())
-    ).scalars().all()
-
-    latest = _latest_reply_status(db)
-    if status and status != "all":
-        emails = [e for e in emails if latest.get(e.id) == status]
-
-    total = len(emails)
+    rows = _conversation_rows(db, risk_level=risk_level, status=status, keyword=keyword)
+    total = len(rows)
     start = (page - 1) * size
-    page_emails = emails[start : start + size]
-    items = [
-        {
-            "id": e.id,
-            "conversation_id": e.conversation_id,
-            "subject": e.subject,
-            "from_email": e.from_email,
-            "risk_level": e.risk_level,
-            "confidence": e.confidence,
-            "summary_cn": e.summary_cn,
-            "received_at": _fmt(e.received_at),
-            "status": latest.get(e.id),
-        }
-        for e in page_emails
-    ]
-    return ok({"items": items, "total": total, "page": page})
+    return ok({"items": rows[start : start + size], "total": total, "page": page})
+
+
+@router.get("/inbox/unread-count")
+async def inbox_unread_count(
+    _user=Depends(require_owner),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Conversations with at least one unread email (not raw email count)."""
+
+    convs = db.execute(
+        select(Email.conversation_id).where(Email.is_read.is_(False)).distinct()
+    ).all()
+    return ok({"unread": len(convs)})
+
+
+@router.post("/inbox/{email_id}/read")
+async def mark_email_read(
+    email_id: int,
+    _user=Depends(require_owner),
+    db: Session = Depends(get_db),
+) -> dict:
+    email = db.get(Email, email_id)
+    if email is None:
+        raise HTTPException(status_code=404, detail="NOT_FOUND")
+    email.is_read = True
+    db.commit()
+    return ok({"id": email.id, "is_read": True})
+
+
+@router.post("/inbox/conversations/{conversation_id}/read")
+async def mark_conversation_read(
+    conversation_id: int,
+    _user=Depends(require_owner),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Mark every unread email in a conversation as read."""
+
+    conv = db.get(Conversation, conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="NOT_FOUND")
+    db.execute(
+        update(Email)
+        .where(Email.conversation_id == conversation_id, Email.is_read.is_(False))
+        .values(is_read=True)
+    )
+    db.commit()
+    return ok({"id": conversation_id, "is_read": True})
 
 
 @router.get("/inbox/{email_id}")

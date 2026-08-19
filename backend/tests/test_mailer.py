@@ -10,7 +10,7 @@ from app.models.reply import Reply
 from app.services.audit import utcnow
 from app.services.mailer import MailerService, build_message
 
-from conftest import FakeSMTP
+from conftest import FakeIMAPAppend, FakeSMTP
 
 
 def _reply() -> Reply:
@@ -52,6 +52,57 @@ def test_send_success(db, settings, fake_smtp_class) -> None:
     service.send(_reply(), "customer@example.com", "Question")
     assert len(FakeSMTP.instances) == 1
     assert FakeSMTP.instances[0].sent[0]["To"] == "customer@example.com"
+
+
+def test_send_appends_copy_to_sent_folder(db, fake_smtp_class) -> None:
+    FakeIMAPAppend.reset()
+    settings = Settings(
+        email_username="bot@example.com",
+        llm_provider="mock",
+        imap_host="imap.example.com",
+        imap_sent_folder="Sent",
+    )
+    service = MailerService(db, settings, smtp_class=FakeSMTP, imap_class=FakeIMAPAppend)
+    service.send(_reply(), "customer@example.com", "Question")
+
+    assert len(FakeIMAPAppend.instances) == 1
+    conn = FakeIMAPAppend.instances[0]
+    assert len(conn.append_calls) == 1
+    folder, raw = conn.append_calls[0]
+    assert folder == "Sent"
+    text = raw.decode("utf-8")
+    assert "To: customer@example.com" in text
+    assert "Subject: Re: Question" in text
+    assert "Message-ID: <out-1@example.com>" in text
+    assert "In-Reply-To: in-1@example.com" in text
+
+
+def test_send_skips_append_when_folder_empty(db, fake_smtp_class) -> None:
+    FakeIMAPAppend.reset()
+    settings = Settings(
+        email_username="bot@example.com",
+        llm_provider="mock",
+        imap_host="imap.example.com",
+        imap_sent_folder="",
+    )
+    service = MailerService(db, settings, smtp_class=FakeSMTP, imap_class=FakeIMAPAppend)
+    service.send(_reply(), "customer@example.com", "Question")
+    assert FakeIMAPAppend.instances == []
+
+
+def test_send_survives_append_failure(db, fake_smtp_class) -> None:
+    FakeIMAPAppend.reset()
+    FakeIMAPAppend.fail_append = True
+    settings = Settings(
+        email_username="bot@example.com",
+        llm_provider="mock",
+        imap_host="imap.example.com",
+        imap_sent_folder="Sent",
+    )
+    service = MailerService(db, settings, smtp_class=FakeSMTP, imap_class=FakeIMAPAppend)
+    # The email was already delivered via SMTP; a failed copy must not raise.
+    service.send(_reply(), "customer@example.com", "Question")
+    assert len(FakeSMTP.instances) == 1
 
 
 def test_send_retries_then_succeeds(db, settings, fake_smtp_class) -> None:

@@ -36,10 +36,24 @@ def test_data_dir_absolute_derives_db_and_attachments() -> None:
     assert settings.attachment_dir == "/app/data/attachments"
 
 
+def test_data_dir_drives_defaults_without_explicit_paths() -> None:
+    # Empty defaults (no DATABASE_URL / ATTACHMENT_DIR anywhere) must follow
+    # DATA_DIR - the fix for .env default values overriding the data root.
+    # `_env_file=None` keeps the test independent of the real .env.
+    settings = Settings(data_dir="/app/data", _env_file=None)
+    assert settings.database_url == "sqlite:////app/data/app.db"
+    assert settings.attachment_dir == "/app/data/attachments"
+
+
 def test_data_dir_relative_resolves_against_repo() -> None:
     settings = Settings(data_dir="var/data", database_url="", attachment_dir="")
     assert settings.database_url == f"sqlite:///{REPO_ROOT / 'var' / 'data' / 'app.db'}"
     assert settings.attachment_dir == str(REPO_ROOT / "var" / "data" / "attachments")
+
+
+def test_relative_attachment_dir_resolves_against_repo() -> None:
+    settings = Settings(attachment_dir="data/attachments")
+    assert settings.attachment_dir == str(REPO_ROOT / "data" / "attachments")
 
 
 def test_explicit_paths_win_over_data_dir() -> None:

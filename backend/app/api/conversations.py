@@ -127,6 +127,8 @@ async def conversation_detail(
                 "direction": "inbound",
                 "email_id": e.id,
                 "content": e.body_text or "",
+                "body_html": e.body_html,
+                "summary_cn": e.summary_cn,
                 "at": _fmt(e.received_at),
             }
         )
@@ -150,6 +152,8 @@ async def conversation_detail(
                 "filename": a.filename,
                 "attachment_id": a.id,
                 "email_id": a.email_id,
+                "content_type": a.content_type,
+                "size_bytes": a.size_bytes,
                 "at": _fmt(a.created_at),
             }
         )

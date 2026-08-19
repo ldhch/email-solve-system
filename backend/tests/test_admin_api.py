@@ -25,11 +25,14 @@ def _seed_conversation(
     emails: int = 1,
     reply: dict | None = None,
     ticket: dict | None = None,
+    customer_email: str = "c@example.com",
 ) -> dict:
     """Insert customer/conversation/emails(+optional reply/ticket), return ids."""
 
     with session_factory() as db:
-        customer = Customer(email="c@example.com", display_name="John", created_at=utcnow())
+        customer = Customer(
+            email=customer_email, display_name="John", created_at=utcnow()
+        )
         db.add(customer)
         db.flush()
         conv = Conversation(
@@ -43,10 +46,11 @@ def _seed_conversation(
         db.add(conv)
         db.flush()
         email_ids = []
+        uid = customer_email.split("@")[0]
         for i in range(emails):
             email = Email(
                 conversation_id=conv.id,
-                message_id=f"<admin-{i}@example.com>",
+                message_id=f"<admin-{i}-{uid}@example.com>",
                 subject=f"Order question {i}",
                 from_email="c@example.com",
                 to_email="bot@example.com",
@@ -65,7 +69,7 @@ def _seed_conversation(
             reply_row = Reply(
                 conversation_id=conv.id,
                 email_id=email_ids[-1],
-                message_id="<out-admin@example.com>",
+                message_id=f"<out-admin-{uid}@example.com>",
                 in_reply_to=email_ids[-1],
                 content_cn=reply.get("content_cn"),
                 content_en=reply.get("content_en", "English content"),
@@ -122,11 +126,18 @@ def test_inbox_list_and_detail(settings, session_factory) -> None:
         resp = api(client, "GET", "/api/v1/inbox")
         assert resp.status_code == 200
         body = resp.json()["data"]
-        assert body["total"] == 2
-        assert body["items"][0]["subject"] == "Order question 1"
+        # 2 emails fold into a single conversation row
+        assert body["total"] == 1
+        item = body["items"][0]
+        assert item["id"] == ids["conversation_id"]
+        assert item["subject"] == "Order question 1"
+        assert item["email_count"] == 2
+        assert item["unread_count"] == 2
+        assert item["is_read"] is False
+        assert item["risk_level"] == "medium"
 
         filtered = api(client, "GET", "/api/v1/inbox", params={"risk_level": "medium"})
-        assert filtered.json()["data"]["total"] == 2
+        assert filtered.json()["data"]["total"] == 1
         none = api(client, "GET", "/api/v1/inbox", params={"risk_level": "high"})
         assert none.json()["data"]["total"] == 0
 
@@ -135,6 +146,87 @@ def test_inbox_list_and_detail(settings, session_factory) -> None:
         data = detail.json()["data"]
         assert data["conversation_id"] == ids["conversation_id"]
         assert data["summary_cn"] == "中文摘要"
+    finally:
+        close_client(client)
+
+
+def test_inbox_unread_and_mark_read(settings, session_factory) -> None:
+    ids = _seed_conversation(session_factory, emails=2)
+    client = _authed_client(settings, session_factory)
+    try:
+        # unread-count is conversation-level: 1 conversation holds 2 unread emails
+        count = api(client, "GET", "/api/v1/inbox/unread-count").json()["data"]
+        assert count["unread"] == 1
+
+        email_id = ids["email_ids"][0]
+        marked = api(client, "POST", f"/api/v1/inbox/{email_id}/read")
+        assert marked.status_code == 200
+        assert marked.json()["data"]["is_read"] is True
+
+        # one unread email remains in the conversation -> still counted unread
+        after = api(client, "GET", "/api/v1/inbox/unread-count").json()["data"]
+        assert after["unread"] == 1
+
+        listing = api(client, "GET", "/api/v1/inbox").json()["data"]["items"]
+        assert listing[0]["is_read"] is False
+        assert listing[0]["unread_count"] == 1
+    finally:
+        close_client(client)
+
+
+def test_inbox_conversation_aggregation(settings, session_factory) -> None:
+    ids_a = _seed_conversation(
+        session_factory,
+        emails=2,
+        customer_email="a@example.com",
+        reply={
+            "status": "sent",
+            "content_en": "Reply English",
+            "content_cn": "回复内容",
+        },
+    )
+    ids_b = _seed_conversation(session_factory, emails=1, customer_email="b@example.com")
+    client = _authed_client(settings, session_factory)
+    try:
+        body = api(client, "GET", "/api/v1/inbox").json()["data"]
+        assert body["total"] == 2
+        by_id = {item["id"]: item for item in body["items"]}
+
+        row_a = by_id[ids_a["conversation_id"]]
+        assert row_a["email_count"] == 2
+        assert row_a["unread_count"] == 2
+        assert row_a["latest_status"] == "sent"
+        # latest activity is the reply (ties resolve toward the reply)
+        assert row_a["summary_cn"] == "回复内容"
+        assert row_a["customer_name"] == "John"
+
+        row_b = by_id[ids_b["conversation_id"]]
+        assert row_b["email_count"] == 1
+        assert row_b["latest_status"] is None
+        assert row_b["summary_cn"] == "中文摘要"
+    finally:
+        close_client(client)
+
+
+def test_inbox_conversation_read(settings, session_factory) -> None:
+    ids = _seed_conversation(session_factory, emails=2)
+    client = _authed_client(settings, session_factory)
+    try:
+        resp = api(
+            client,
+            "POST",
+            f"/api/v1/inbox/conversations/{ids['conversation_id']}/read",
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"]["is_read"] is True
+
+        count = api(client, "GET", "/api/v1/inbox/unread-count").json()["data"]
+        assert count["unread"] == 0
+        listing = api(client, "GET", "/api/v1/inbox").json()["data"]["items"]
+        assert listing[0]["is_read"] is True
+
+        missing = api(client, "POST", "/api/v1/inbox/conversations/9999/read")
+        assert missing.status_code == 404
     finally:
         close_client(client)
 

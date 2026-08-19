@@ -1,12 +1,20 @@
-"""SMTP send service with retry and optional rate limiting (M-11)."""
+"""SMTP send service with retry and optional rate limiting (M-11).
+
+After a successful SMTP send, a copy of the message is appended to the
+mailbox's sent folder over IMAP. Titan's SMTP does NOT auto-save outbound
+copies, so without this the AI's replies would exist only in the local DB and
+be invisible in the Hostinger webmail conversation view.
+"""
 
 from __future__ import annotations
 
+import imaplib
 import logging
 import smtplib
 import time
 from datetime import timedelta
 from email.message import EmailMessage
+from email.utils import formatdate
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -76,10 +84,12 @@ class MailerService:
         db: Session | None,
         settings: Settings,
         smtp_class: type | None = None,
+        imap_class: type | None = None,
     ) -> None:
         self.db = db
         self.settings = settings
         self.smtp_class = smtp_class or smtplib.SMTP_SSL
+        self.imap_class = imap_class or imaplib.IMAP4_SSL
 
     def _check_rate_limit(self) -> None:
         limit = self.settings.smtp_rate_limit_per_hour
@@ -115,6 +125,35 @@ class MailerService:
             except Exception:  # noqa: BLE001 - connection may already be gone
                 pass
 
+    def _append_sent_copy(self, msg: EmailMessage) -> None:
+        """Store a copy of the sent mail in the mailbox's sent folder (IMAP).
+
+        Best-effort only: the email was already delivered over SMTP, so an
+        append failure is logged and never raised. Without this copy Titan's
+        webmail conversation view has no trace of the AI's reply (the mailbox
+        lost a message the frontend shows as sent).
+        """
+
+        folder = self.settings.imap_sent_folder
+        if not folder:
+            return
+        if "Date" not in msg:
+            msg["Date"] = formatdate(localtime=True)
+        raw = msg.as_string()
+        conn = self.imap_class(
+            self.settings.imap_host,
+            self.settings.imap_port,
+            timeout=self.settings.imap_timeout,
+        )
+        try:
+            conn.login(self.settings.email_username, self.settings.email_password)
+            conn.append(folder, r"(\Seen)", imaplib.Time2Internaldate(time.time()), raw.encode("utf-8"))
+        finally:
+            try:
+                conn.logout()
+            except Exception:  # noqa: BLE001 - already gone
+                pass
+
     def send(self, reply, to_email: str, subject: str) -> None:
         """Send with 3 attempts; raise SMTPError after all retries."""
 
@@ -124,13 +163,18 @@ class MailerService:
         for attempt in range(1, 4):
             try:
                 self._send_once(msg)
-                return
+                break
             except Exception as exc:  # noqa: BLE001 - smtplib raises many types
                 last_error = exc
                 logger.warning("SMTP send failed (attempt %s/3): %s", attempt, exc)
                 if attempt < 3:
                     time.sleep(min(2 ** (attempt - 1), 4))
-        raise SMTPError(f"SMTP send failed after 3 attempts: {last_error}") from last_error
+        else:
+            raise SMTPError(f"SMTP send failed after 3 attempts: {last_error}") from last_error
+        try:
+            self._append_sent_copy(msg)
+        except Exception as exc:  # noqa: BLE001 - best effort, never fail a delivered mail
+            logger.warning("Failed to store sent copy in mailbox: %s", exc)
 
     def send_text(
         self,

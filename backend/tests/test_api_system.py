@@ -102,7 +102,7 @@ def test_status_initial(settings, session_factory) -> None:
     try:
         resp = api(client, "GET", "/api/v1/system/status")
         assert resp.status_code == 200
-        assert resp.json()["ai_paused"] is False
+        assert resp.json()["data"]["ai_paused"] is False
     finally:
         close_client(client)
 
@@ -124,19 +124,19 @@ def test_pause_and_resume_flow(settings, session_factory) -> None:
 
         resp = api(client, "POST", "/api/v1/system/pause", json={"reason": "going offline"})
         assert resp.status_code == 200
-        body = resp.json()
+        body = resp.json()["data"]
         assert body["ai_paused"] is True
         assert body["paused_reason"] == "going offline"
         assert body["paused_at"] is not None
 
-        status = api(client, "GET", "/api/v1/system/status").json()
+        status = api(client, "GET", "/api/v1/system/status").json()["data"]
         assert status["ai_paused"] is True
 
         resume = api(client, "POST", "/api/v1/system/resume")
         assert resume.status_code == 200
-        assert resume.json()["ai_paused"] is False
+        assert resume.json()["data"]["ai_paused"] is False
 
-        after = api(client, "GET", "/api/v1/system/status").json()
+        after = api(client, "GET", "/api/v1/system/status").json()["data"]
         assert after["ai_paused"] is False
         assert after["paused_at"] is None
         assert after["paused_reason"] is None

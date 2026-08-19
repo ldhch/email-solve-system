@@ -1,3 +1,4 @@
+import DOMPurify from "dompurify";
 import { http } from "../api/client";
 
 export interface TimelineItem {
@@ -9,10 +10,38 @@ export interface TimelineItem {
   content?: string;
   content_en?: string;
   content_cn?: string | null;
+  summary_cn?: string | null;
+  body_html?: string | null;
+  content_type?: string | null;
+  size_bytes?: number | null;
   status?: string;
   reply_type?: string;
   filename?: string;
   at?: string | null;
+}
+
+const STATUS_STYLE: Record<string, string> = {
+  sent: "bg-risk-low-tint text-risk-low",
+  pending_review: "bg-accent-tint text-accent",
+  failed: "bg-risk-high-tint text-risk-high",
+  draft: "bg-[#EFF1F3] text-sub",
+};
+
+const STATUS_LABEL: Record<string, string> = {
+  pending_review: "待审核",
+  sent: "已发送",
+  failed: "发送失败",
+  draft: "草稿",
+};
+
+const TYPE_LABEL: Record<string, string> = {
+  email: "客户来信",
+  reply: "系统 / 人工回复",
+  attachment: "附件",
+};
+
+function fmt(iso?: string | null): string {
+  return iso ? iso.replace("T", " ").replace("Z", "") : "";
 }
 
 export function Timeline({
@@ -35,64 +64,62 @@ export function Timeline({
   }
 
   return (
-    <ol className="space-y-4">
+    <ol className="divide-y divide-line">
       {items.map((item, idx) => (
-        <li key={idx} className="bg-white rounded-lg border border-gray-200 p-4">
-          <div className="flex items-center gap-2 mb-2 text-xs text-gray-500">
-            <span className="font-medium text-gray-700">
-              {item.type === "email"
-                ? "客户来信"
-                : item.type === "reply"
-                  ? "系统/人工回复"
-                  : "附件"}
+        <li key={idx} className="py-4 first:pt-0 last:pb-0">
+          <div className="flex items-center gap-2 mb-1.5 text-[11.5px] text-sub">
+            <span className="font-medium text-ink">
+              {TYPE_LABEL[item.type] || item.type}
             </span>
             {item.status && (
               <span
-                className={`px-1.5 py-0.5 rounded ${
-                  item.status === "sent"
-                    ? "bg-green-100 text-green-700"
-                    : item.status === "pending_review"
-                      ? "bg-blue-100 text-blue-700"
-                      : item.status === "failed"
-                        ? "bg-red-100 text-red-700"
-                        : "bg-gray-100 text-gray-600"
+                className={`px-1.5 py-0.5 rounded text-[11px] ${
+                  STATUS_STYLE[item.status] || "bg-[#EFF1F3] text-sub"
                 }`}
               >
-                {item.status === "pending_review"
-                  ? "待审核"
-                  : item.status === "sent"
-                    ? "已发送"
-                    : item.status === "failed"
-                      ? "发送失败"
-                      : "草稿"}
+                {STATUS_LABEL[item.status] || item.status}
               </span>
             )}
             {item.reply_type && item.reply_type !== "general" && (
-              <span className="text-purple-600">{item.reply_type}</span>
+              <span className="text-accent">{item.reply_type}</span>
             )}
-            <span>{item.at ? item.at.replace("T", " ").replace("Z", "") : ""}</span>
+            <span className="ml-auto tabular-nums">{fmt(item.at)}</span>
           </div>
 
-          {item.type === "email" && (
-            <div className="text-sm whitespace-pre-wrap">{item.content}</div>
-          )}
+          {item.type === "email" &&
+            (showCn && item.summary_cn ? (
+              <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
+                {item.summary_cn}
+              </div>
+            ) : item.body_html ? (
+              <div
+                className="text-[13.5px] leading-relaxed [&_img]:max-w-full [&_table]:w-full [&_a]:text-accent [&_a]:underline"
+                dangerouslySetInnerHTML={{
+                  __html: DOMPurify.sanitize(item.body_html),
+                }}
+              />
+            ) : (
+              <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
+                {item.content}
+              </div>
+            ))}
 
           {item.type === "reply" && (
             <div>
-              <div className="text-sm whitespace-pre-wrap">
+              <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
                 {showCn && item.content_cn ? item.content_cn : item.content_en}
               </div>
               {item.status === "pending_review" && item.reply_id && (
                 <div className="mt-3 flex gap-2">
                   <button
                     onClick={() => approve(item.reply_id!)}
-                    className="px-3 py-1 bg-green-600 text-white rounded text-xs"
+                    className="px-3 py-1.5 bg-accent text-white rounded text-[12px] font-medium hover:bg-accent/90"
                   >
                     审核通过并发送
                   </button>
                   <button
                     onClick={() => reject(item.reply_id!)}
-                    className="px-3 py-1 bg-yellow-500 text-white rounded text-xs"
+                    className="px-3 py-1.5 border border-line text-sub rounded text-[12px] hover:text-ink hover:bg-[#F7F9FB]"
                   >
                     驳回为草稿
                   </button>
@@ -102,14 +129,26 @@ export function Timeline({
           )}
 
           {item.type === "attachment" && (
-            <a
-              href={`/api/v1/attachments/${item.attachment_id}`}
-              target="_blank"
-              rel="noreferrer"
-              className="text-sm text-blue-600 underline"
-            >
-              📎 {item.filename}
-            </a>
+            <div className="flex flex-col gap-2">
+              {item.content_type?.startsWith("image/") && item.attachment_id && (
+                <img
+                  src={`/api/v1/attachments/${item.attachment_id}`}
+                  alt={item.filename}
+                  className="max-h-64 rounded border border-line"
+                />
+              )}
+              <a
+                href={`/api/v1/attachments/${item.attachment_id}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-[13px] text-accent underline"
+              >
+                📎 {item.filename}
+                {typeof item.size_bytes === "number"
+                  ? `（${(item.size_bytes / 1024).toFixed(0)} KB）`
+                  : ""}
+              </a>
+            </div>
           )}
         </li>
       ))}

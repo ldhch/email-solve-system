@@ -59,15 +59,15 @@ async def healthz(db: Session = Depends(get_db)) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=body.model_dump())
 
 
-@router.get("/system/status", response_model=SystemStatusResponse)
-async def system_status(db: Session = Depends(get_db)) -> SystemStatusResponse:
+@router.get("/system/status")
+async def system_status(db: Session = Depends(get_db)) -> dict:
     state = db.get(SystemState, 1)
-    return SystemStatusResponse(
+    return ok(SystemStatusResponse(
         ai_paused=bool(state and state.ai_paused),
         paused_at=_fmt(state.paused_at if state else None),
         paused_reason=state.paused_reason if state else None,
         uptime_sec=int(time.time() - _STARTED_AT),
-    )
+    ).model_dump())
 
 
 @router.get("/system/notifications")
@@ -95,13 +95,13 @@ async def system_notifications(
     )
 
 
-@router.post("/system/pause", response_model=SystemStatusResponse)
+@router.post("/system/pause")
 async def system_pause(
     payload: PauseRequest,
     request: Request,
     user: User = Depends(require_owner),
     db: Session = Depends(get_db),
-) -> SystemStatusResponse:
+) -> dict:
     state = db.get(SystemState, 1)
     if state is None:
         raise HTTPException(status_code=500, detail="INTERNAL")
@@ -118,20 +118,20 @@ async def system_pause(
         ip=request.client.host if request.client else None,
     )
     db.commit()
-    return SystemStatusResponse(
+    return ok(SystemStatusResponse(
         ai_paused=True,
         paused_at=_fmt(state.paused_at),
         paused_reason=state.paused_reason,
         uptime_sec=int(time.time() - _STARTED_AT),
-    )
+    ).model_dump())
 
 
-@router.post("/system/resume", response_model=SystemStatusResponse)
+@router.post("/system/resume")
 async def system_resume(
     request: Request,
     user: User = Depends(require_owner),
     db: Session = Depends(get_db),
-) -> SystemStatusResponse:
+) -> dict:
     state = db.get(SystemState, 1)
     if state is None:
         raise HTTPException(status_code=500, detail="INTERNAL")
@@ -148,9 +148,9 @@ async def system_resume(
         ip=request.client.host if request.client else None,
     )
     db.commit()
-    return SystemStatusResponse(
+    return ok(SystemStatusResponse(
         ai_paused=False,
         paused_at=None,
         paused_reason=None,
         uptime_sec=int(time.time() - _STARTED_AT),
-    )
+    ).model_dump())

@@ -31,6 +31,7 @@ class Email(Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     is_inbound: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     has_attachments: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     received_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
 
     conversation = relationship("Conversation", back_populates="emails")
