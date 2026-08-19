@@ -1,4 +1,4 @@
-"""Chinese -> English translation service (M-10, PRD F6)."""
+"""Bilingual translation service (ZH->EN for replies, EN->ZH for display)."""
 
 from __future__ import annotations
 
@@ -15,6 +15,17 @@ Rules:
 - Output only the English translation; no headers, quotes or explanations.
 """
 
+TRANSLATE_CN_SYSTEM_PROMPT = """\
+You translate English customer-support email content into natural, fluent
+Simplified Chinese (中文).
+Rules:
+- Translate the FULL text faithfully; never summarize or drop details.
+- Preserve paragraph and list structure, and the original line breaks.
+- Keep order numbers, amounts, tracking numbers, brand names and proper nouns
+  exactly as-is.
+- Output only the Chinese translation; no headers, quotes or explanations.
+"""
+
 
 def _load_prompt() -> str:
     prompt_file = prompts_dir() / "translate_reply.md"
@@ -24,7 +35,7 @@ def _load_prompt() -> str:
 
 
 class TranslatorService:
-    """Translates the owner's Chinese reply before sending (F6)."""
+    """Translates between the owner's Chinese and the customer's English."""
 
     def __init__(self, llm_client: BaseLLMClient) -> None:
         self.llm_client = llm_client
@@ -36,4 +47,17 @@ class TranslatorService:
             messages=[{"role": "user", "content": text.strip()}],
             system_prompt=_load_prompt(),
             temperature=0.2,
+        ).strip()
+
+    def translate_to_chinese(self, text: str) -> str:
+        """Translate the full English text into Simplified Chinese."""
+        if not text or not text.strip():
+            raise ValueError("Empty English content")
+        return self.llm_client.chat_with_retry(
+            messages=[{"role": "user", "content": text.strip()}],
+            system_prompt=TRANSLATE_CN_SYSTEM_PROMPT,
+            temperature=0.2,
+            # Full-text translation of long emails needs a larger output budget
+            # than the default 2048 (which truncates to an empty response).
+            max_tokens=4096,
         ).strip()

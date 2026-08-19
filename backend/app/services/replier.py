@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, prompts_dir
-from app.core.exceptions import SMTPError
+from app.core.exceptions import LLMError, SMTPError
 from app.llm.client import BaseLLMClient
 from app.models.conversation import Conversation
 from app.models.email import Email
@@ -25,6 +25,7 @@ from app.models.reply import Reply
 from app.services.knowledge import KnowledgeService
 from app.services.qa import QAService, match_qa
 from app.services.audit import log_action, utcnow
+from app.services.translator import TranslatorService
 
 logger = logging.getLogger(__name__)
 
@@ -356,8 +357,15 @@ class ReplierService:
         status: str = "draft",
         content_cn: str | None = None,
     ) -> Reply:
-        """Persist a Reply row without sending it."""
+        """Persist a Reply row without sending it.
 
+        When the caller did not supply a Chinese version, the English reply is
+        translated in full so the boss can read it in Chinese (translation is
+        non-fatal: a failure leaves the reply English-only).
+        """
+
+        if content_cn is None and content_en:
+            content_cn = self._translate_cn(content_en)
         reply = Reply(
             conversation_id=conversation.id,
             email_id=email_row.id,
@@ -373,6 +381,19 @@ class ReplierService:
         self.db.add(reply)
         self.db.flush()
         return reply
+
+    def _translate_cn(self, content_en: str) -> str | None:
+        """Translate the English reply to full Simplified Chinese.
+
+        Non-fatal: if the translation call fails the reply stays English-only
+        so the critical generate-and-send path is never blocked.
+        """
+
+        try:
+            return TranslatorService(self.llm_client).translate_to_chinese(content_en)
+        except LLMError:
+            logger.warning("Reply Chinese translation failed; keeping English only")
+            return None
 
     def generate_and_send(
         self,

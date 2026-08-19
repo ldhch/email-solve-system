@@ -129,6 +129,7 @@ async def conversation_detail(
                 "content": e.body_text or "",
                 "body_html": e.body_html,
                 "summary_cn": e.summary_cn,
+                "content_cn": e.content_cn,
                 "at": _fmt(e.received_at),
             }
         )

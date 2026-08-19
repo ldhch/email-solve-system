@@ -151,6 +151,15 @@ def _ensure_reply_source_column(engine: Engine) -> None:
             )
 
 
+def _ensure_email_content_cn_column(engine: Engine) -> None:
+    """Add ``emails.content_cn`` to DBs created before the column existed."""
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(emails)"))}
+        if "content_cn" not in cols:
+            conn.execute(text("ALTER TABLE emails ADD COLUMN content_cn TEXT"))
+
+
 def init_db(settings: Settings | None = None) -> None:
     """Create all tables (create_all) and seed defaults. No migrations."""
 
@@ -164,6 +173,7 @@ def init_db(settings: Settings | None = None) -> None:
     _ensure_email_is_read_column(engine)
     _ensure_email_pending_after_pause_column(engine)
     _ensure_reply_source_column(engine)
+    _ensure_email_content_cn_column(engine)
     seed(settings)
 
 

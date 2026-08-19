@@ -1,4 +1,5 @@
-import { http } from "../api/client";
+import { useState } from "react";
+import { dataOf, errorText, http } from "../api/client";
 import { formatLocal } from "../utils/format";
 
 export interface TimelineItem {
@@ -58,6 +59,36 @@ export function Timeline({
   showCn: boolean;
   onRefresh: () => void;
 }) {
+  // Per-email display mode (概括 vs 全文) with cached full Chinese
+  // translations fetched on demand from /emails/{id}/translate.
+  const [fullMode, setFullMode] = useState<Set<number>>(new Set());
+  const [fullCn, setFullCn] = useState<Record<number, string>>({});
+  const [translatingId, setTranslatingId] = useState<number | null>(null);
+  const [translateErrors, setTranslateErrors] = useState<Record<number, string>>(
+    {},
+  );
+
+  async function showFull(item: TimelineItem) {
+    const id = item.email_id!;
+    setFullMode((prev) => new Set(prev).add(id));
+    if (fullCn[id] || item.content_cn) return;
+    setTranslatingId(id);
+    try {
+      const resp = await http.post(`/emails/${id}/translate`);
+      const data = dataOf<{ content_cn: string }>(resp);
+      setFullCn((prev) => ({ ...prev, [id]: data.content_cn }));
+      setTranslateErrors((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    } catch (err) {
+      setTranslateErrors((prev) => ({ ...prev, [id]: errorText(err) }));
+    } finally {
+      setTranslatingId(null);
+    }
+  }
+
   async function approve(replyId: number) {
     await http.post(`/replies/${replyId}/approve`);
     onRefresh();
@@ -92,9 +123,58 @@ export function Timeline({
           </div>
 
           {item.type === "email" &&
-            (showCn && item.summary_cn ? (
-              <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
-                {item.summary_cn}
+            (showCn ? (
+              <div>
+                <div className="mb-1.5 flex items-center gap-1 text-[11px]">
+                  <button
+                    onClick={() =>
+                      setFullMode((prev) => {
+                        const next = new Set(prev);
+                        next.delete(item.email_id!);
+                        return next;
+                      })
+                    }
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      fullMode.has(item.email_id!)
+                        ? "text-sub hover:text-ink"
+                        : "bg-accent text-white font-medium"
+                    }`}
+                  >
+                    概括
+                  </button>
+                  <button
+                    onClick={() => showFull(item)}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      fullMode.has(item.email_id!)
+                        ? "bg-accent text-white font-medium"
+                        : "text-sub hover:text-ink"
+                    }`}
+                  >
+                    全文
+                  </button>
+                </div>
+                {fullMode.has(item.email_id!) ? (
+                  translatingId === item.email_id &&
+                  !fullCn[item.email_id!] &&
+                  !item.content_cn ? (
+                    <div className="text-[13.5px] leading-relaxed text-sub">
+                      全文翻译中…
+                    </div>
+                  ) : (
+                    <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
+                      {fullCn[item.email_id!] ?? item.content_cn ?? item.content}
+                    </div>
+                  )
+                ) : (
+                  <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
+                    {item.summary_cn || item.content}
+                  </div>
+                )}
+                {translateErrors[item.email_id!] && (
+                  <p className="mt-1 text-[12px] text-risk-high">
+                    {translateErrors[item.email_id!]}
+                  </p>
+                )}
               </div>
             ) : (
               <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">

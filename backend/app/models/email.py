@@ -26,6 +26,8 @@ class Email(Base):
     body_text: Mapped[str | None] = mapped_column(Text)
     body_html: Mapped[str | None] = mapped_column(Text)
     summary_cn: Mapped[str | None] = mapped_column(Text)
+    # Full Simplified-Chinese translation of body_text, cached on demand.
+    content_cn: Mapped[str | None] = mapped_column(Text)
     category: Mapped[str | None] = mapped_column(String(64), index=True)
     risk_level: Mapped[str | None] = mapped_column(String(20), index=True)
     confidence: Mapped[float | None] = mapped_column(Float)
