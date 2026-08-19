@@ -203,18 +203,18 @@ export function Timeline({
                       translatingId === item.email_id &&
                       !fullCn[item.email_id!] &&
                       !item.content_cn ? (
-                        <div className="text-[15px] leading-normal text-sub">
+                        <div className="text-[16px] leading-normal text-sub">
                           全文翻译中…
                         </div>
                       ) : (
-                        <div className="text-[15px] leading-normal whitespace-pre-wrap text-ink">
+                        <div className="text-[16px] leading-normal whitespace-pre-wrap text-ink">
                           {normalizeSpacing(
                             fullCn[item.email_id!] ?? item.content_cn ?? item.content,
                           )}
                         </div>
                       )
                     ) : (
-                      <div className="text-[15px] leading-normal whitespace-pre-wrap text-ink">
+                      <div className="text-[16px] leading-normal whitespace-pre-wrap text-ink">
                         {item.summary_cn || normalizeSpacing(item.content)}
                       </div>
                     )}
@@ -225,7 +225,7 @@ export function Timeline({
                     )}
                   </div>
                 ) : (
-                  <div className="text-[15px] leading-[1.75] whitespace-pre-wrap text-ink">
+                  <div className="text-[16px] leading-[1.75] whitespace-pre-wrap text-ink">
                     {normalizeSpacing(item.content)}
                   </div>
                 ))}
