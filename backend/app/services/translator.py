@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import re
+
 from app.config import prompts_dir
 from app.llm.client import BaseLLMClient
+
+# Matches any CJK Unified Ideograph. If the boss's "Chinese reply" contains
+# none, the text is already English (or Latin) — sending it to a "translate
+# ZH->EN" prompt makes the LLM echo an instruction back ("Please provide the
+# Chinese reply..."). Pass such text through unchanged instead.
+_CJK_RE = re.compile(r"[一-鿿]")
 
 TRANSLATE_SYSTEM_PROMPT = """\
 You translate the store owner's Chinese reply into professional, polite,
@@ -43,8 +51,11 @@ class TranslatorService:
     def translate_to_english(self, text: str) -> str:
         if not text or not text.strip():
             raise ValueError("Empty Chinese reply")
+        text = text.strip()
+        if not _CJK_RE.search(text):
+            return text
         return self.llm_client.chat_with_retry(
-            messages=[{"role": "user", "content": text.strip()}],
+            messages=[{"role": "user", "content": text}],
             system_prompt=_load_prompt(),
             temperature=0.2,
         ).strip()

@@ -50,15 +50,17 @@ function typeLabel(item: TimelineItem): string {
   return TYPE_LABEL[item.type] || item.type;
 }
 
-// Raw email bodies sometimes carry HTML entities and double blank lines
-// (plain-text parts keep their original CRLF line endings). Normalize for
-// display: drop &nbsp;, collapse to single newlines, keep at most one blank
-// line between paragraphs.
+// Raw email bodies sometimes carry HTML entities, double blank lines and
+// stray indentation (plain-text parts keep their original CRLF line endings).
+// Normalize for display: drop &nbsp;, collapse to single newlines, keep at
+// most one blank line between paragraphs, and strip leading whitespace so
+// every line starts flush at the same left column.
 function normalizeSpacing(text?: string | null): string {
   return (text ?? "")
     .replace(/&nbsp;/gi, " ")
     .replace(/\r\n/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
+    .replace(/^[ \t]+/gm, "")
     .replace(/\n{3,}/g, "\n\n");
 }
 
@@ -173,14 +175,14 @@ export function Timeline({
                       全文翻译中…
                     </div>
                   ) : (
-                    <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
+                    <div className="text-[13.5px] leading-normal whitespace-pre-wrap text-ink">
                       {normalizeSpacing(
                         fullCn[item.email_id!] ?? item.content_cn ?? item.content,
                       )}
                     </div>
                   )
                 ) : (
-                  <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
+                  <div className="text-[13.5px] leading-normal whitespace-pre-wrap text-ink">
                     {item.summary_cn || normalizeSpacing(item.content)}
                   </div>
                 )}
@@ -191,14 +193,18 @@ export function Timeline({
                 )}
               </div>
             ) : (
-              <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
+              <div className="text-[13.5px] leading-[1.75] whitespace-pre-wrap text-ink">
                 {normalizeSpacing(item.content)}
               </div>
             ))}
 
           {item.type === "reply" && (
             <div>
-              <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
+              <div
+                className={`text-[13.5px] whitespace-pre-wrap text-ink ${
+                  showCn && item.content_cn ? "leading-normal" : "leading-[1.75]"
+                }`}
+              >
                 {showCn && item.content_cn ? item.content_cn : item.content_en}
               </div>
               {item.status === "pending_review" && item.reply_id && (
