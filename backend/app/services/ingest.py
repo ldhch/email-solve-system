@@ -200,6 +200,10 @@ def parse_email(raw: bytes, uid: str | None = None) -> ParsedEmail:
         addr = getaddresses([msg["To"]])
         if addr:
             to_name, to_email = addr[0]
+    # RFC2047 encoded-words in display names (e.g. "=?utf-8?B?...?=") must be
+    # decoded before storing, otherwise the name renders as raw MIME in the UI.
+    from_name = _decode_mime_header(from_name)
+    to_name = _decode_mime_header(to_name)
 
     subject = _decode_mime_header(msg.get("Subject"))
     body_text: str | None = None
