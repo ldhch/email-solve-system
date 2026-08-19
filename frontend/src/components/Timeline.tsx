@@ -50,6 +50,18 @@ function typeLabel(item: TimelineItem): string {
   return TYPE_LABEL[item.type] || item.type;
 }
 
+// Raw email bodies sometimes carry HTML entities and double blank lines
+// (plain-text parts keep their original CRLF line endings). Normalize for
+// display: drop &nbsp;, collapse to single newlines, keep at most one blank
+// line between paragraphs.
+function normalizeSpacing(text?: string | null): string {
+  return (text ?? "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
 export function Timeline({
   items,
   showCn,
@@ -162,12 +174,14 @@ export function Timeline({
                     </div>
                   ) : (
                     <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
-                      {fullCn[item.email_id!] ?? item.content_cn ?? item.content}
+                      {normalizeSpacing(
+                        fullCn[item.email_id!] ?? item.content_cn ?? item.content,
+                      )}
                     </div>
                   )
                 ) : (
                   <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
-                    {item.summary_cn || item.content}
+                    {item.summary_cn || normalizeSpacing(item.content)}
                   </div>
                 )}
                 {translateErrors[item.email_id!] && (
@@ -178,7 +192,7 @@ export function Timeline({
               </div>
             ) : (
               <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-ink">
-                {item.content}
+                {normalizeSpacing(item.content)}
               </div>
             ))}
 
