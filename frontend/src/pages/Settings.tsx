@@ -136,48 +136,53 @@ export default function Settings() {
               暂停时间：{status.paused_at.replace("T", " ").replace("Z", "")}
             </p>
           )}
-          <p className="text-xs text-gray-400 mt-3">
-            服务进程已运行 {fmtUptime(status?.uptime_sec ?? 0)}
-          </p>
         </section>
 
         <section className="bg-white rounded-lg border border-gray-200 p-4">
-          <h2 className="font-semibold mb-3">通知设置（只读）</h2>
-          <p className="text-sm text-gray-600 mb-3">
-            告警通道状态由服务器 .env 配置决定，此处仅展示，不做在线修改。
+          <h2 className="font-semibold mb-3">通知告警（自动）</h2>
+          <p className="text-xs text-gray-500 mb-3">
+            系统会自动通知你以下情况：LLM 连续失败 5 次 / IMAP 连续 3 轮失败 /
+            SLA 逾期 / 补偿挽留审核超时。
           </p>
-          <ul className="text-sm space-y-2">
-            <li className="flex items-center justify-between">
-              <span className="text-gray-600">Bark（iOS 推送）</span>
-              <span
-                className={`px-2 py-0.5 rounded text-xs ${
-                  notifications?.bark_configured
-                    ? "bg-green-100 text-green-700"
-                    : "bg-gray-100 text-gray-600"
-                }`}
-              >
-                {notifications?.bark_configured ? "已配置" : "未配置"}
-              </span>
-            </li>
-            <li className="flex items-center justify-between">
-              <span className="text-gray-600">告警邮箱（SMTP）</span>
-              <span
-                className={`px-2 py-0.5 rounded text-xs ${
-                  notifications?.alert_email_configured
-                    ? "bg-green-100 text-green-700"
-                    : "bg-gray-100 text-gray-600"
-                }`}
-              >
-                {notifications?.alert_email_configured
-                  ? notifications.alert_email_masked
-                  : "未配置"}
-              </span>
-            </li>
-          </ul>
-          <p className="text-xs text-gray-400 mt-3">
-            LLM 连续失败 5 次 / IMAP 连续 3 轮失败 / SLA 逾期 / 补偿挽留审核超时
-            会自动告警。
-          </p>
+          <details className="text-sm">
+            <summary className="w-fit cursor-pointer select-none text-xs text-gray-400 hover:text-gray-600">
+              系统状态（高级）
+            </summary>
+            <ul className="mt-3 space-y-2">
+              <li className="flex items-center justify-between">
+                <span className="text-gray-600">Bark（iOS 推送）</span>
+                <span
+                  className={`px-2 py-0.5 rounded text-xs ${
+                    notifications?.bark_configured
+                      ? "bg-green-100 text-green-700"
+                      : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  {notifications?.bark_configured ? "已配置" : "未配置"}
+                </span>
+              </li>
+              <li className="flex items-center justify-between">
+                <span className="text-gray-600">告警邮箱（SMTP）</span>
+                <span
+                  className={`px-2 py-0.5 rounded text-xs ${
+                    notifications?.alert_email_configured
+                      ? "bg-green-100 text-green-700"
+                      : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  {notifications?.alert_email_configured
+                    ? notifications.alert_email_masked
+                    : "未配置"}
+                </span>
+              </li>
+              <li className="flex items-center justify-between text-gray-500">
+                <span>服务进程已运行</span>
+                <span className="tabular-nums">
+                  {fmtUptime(status?.uptime_sec ?? 0)}
+                </span>
+              </li>
+            </ul>
+          </details>
         </section>
       </div>
 

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { dataOf, errorText, http } from "../api/client";
 import { Layout } from "../components/Layout";
+import { PendingReviewCard } from "../components/PendingReviewCard";
 import { ReplyDraftEditor } from "../components/ReplyDraftEditor";
 import { ReplyEditor } from "../components/ReplyEditor";
 import { RiskTag } from "../components/RiskTag";
 import { Timeline, TimelineItem } from "../components/Timeline";
 import { formatLocal } from "../utils/format";
+import { loadShowCn, saveShowCn } from "../utils/langPref";
 
 interface InboxItem {
   id: number; // conversation id
@@ -69,10 +70,7 @@ export default function Inbox() {
   const [filter, setFilter] = useState<
     "all" | "unread" | "pending_review" | "high"
   >("all");
-  const [sort, setSort] = useState<"latest" | "unread" | "risk">("latest");
-  const [convStatus, setConvStatus] = useState<
-    "" | "open" | "resolved" | "escalated"
-  >("");
+  const [pendingCount, setPendingCount] = useState(0);
   const [keywordInput, setKeywordInput] = useState("");
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -85,9 +83,7 @@ export default function Inbox() {
   const [conv, setConv] = useState<ConversationData | null>(null);
   const [convLoading, setConvLoading] = useState(false);
   const [convError, setConvError] = useState("");
-  const [showCn, setShowCn] = useState(false);
-
-  const navigate = useNavigate();
+  const [showCn, setShowCn] = useState(loadShowCn);
 
   const load = useCallback(
     async (mode: "replace" | "append" = "replace") => {
@@ -105,8 +101,6 @@ export default function Inbox() {
         if (filter === "pending_review") params.status = "pending_review";
         if (filter === "high") params.risk_level = "high";
         if (filter === "unread") params.unread_only = true;
-        if (sort !== "latest") params.sort = sort;
-        if (convStatus) params.conv_status = convStatus;
         if (keyword.trim()) params.keyword = keyword.trim();
         const resp = await http.get("/inbox", { params });
         const data = dataOf<{ items: InboxItem[]; total: number }>(resp);
@@ -130,7 +124,7 @@ export default function Inbox() {
         }
       }
     },
-    [filter, sort, convStatus, keyword],
+    [filter, keyword],
   );
 
   function resetList() {
@@ -150,13 +144,28 @@ export default function Inbox() {
     pageRef.current = 1;
   }, [keyword]);
 
+  // Count of conversations waiting for review, shown as a badge on the
+  // "待审核" tab (independent of the active filter).
+  const loadPendingCount = useCallback(async () => {
+    try {
+      const resp = await http.get("/inbox", {
+        params: { status: "pending_review", size: 1 },
+      });
+      setPendingCount(dataOf<{ total: number }>(resp).total);
+    } catch {
+      // keep the last known count
+    }
+  }, []);
+
   useEffect(() => {
     load();
+    loadPendingCount();
     const timer = setInterval(() => {
       if (!loadingRef.current) load("replace");
+      loadPendingCount();
     }, 30000);
     return () => clearInterval(timer);
-  }, [load]);
+  }, [load, loadPendingCount]);
 
   // Keep a live copy of the loaded rows so a polling replace can refetch the
   // full visible set (with fresh sort order) regardless of how many were loaded.
@@ -256,42 +265,20 @@ export default function Inbox() {
                 }`}
               >
                 {t.label}
+                {t.key === "pending_review" && pendingCount > 0 && (
+                  <span
+                    className={`ml-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[11px] font-semibold tabular-nums ${
+                      filter === t.key
+                        ? "bg-white text-accent"
+                        : "bg-risk-high text-white"
+                    }`}
+                  >
+                    {pendingCount}
+                  </span>
+                )}
               </button>
             ))}
           </div>
-          <select
-            value={sort}
-            onChange={(e) => {
-              const next = e.target.value as "latest" | "unread" | "risk";
-              if (next === sort) return;
-              setSort(next);
-              resetList();
-            }}
-            className="h-[30px] border border-line rounded-md bg-white px-2 text-[13px] text-sub focus:border-accent focus:outline-none"
-          >
-            <option value="latest">最新活动</option>
-            <option value="unread">未读优先</option>
-            <option value="risk">风险优先</option>
-          </select>
-          <select
-            value={convStatus}
-            onChange={(e) => {
-              const next = e.target.value as
-                | ""
-                | "open"
-                | "resolved"
-                | "escalated";
-              if (next === convStatus) return;
-              setConvStatus(next);
-              resetList();
-            }}
-            className="h-[30px] border border-line rounded-md bg-white px-2 text-[13px] text-sub focus:border-accent focus:outline-none"
-          >
-            <option value="">全部状态</option>
-            <option value="open">进行中(open)</option>
-            <option value="resolved">已解决(resolved)</option>
-            <option value="escalated">人工介入(escalated)</option>
-          </select>
           <input
             value={keywordInput}
             onChange={(e) => setKeywordInput(e.target.value)}
@@ -443,21 +430,21 @@ export default function Inbox() {
                       </span>
                     )}
                     <button
-                      onClick={() => setShowCn((v) => !v)}
+                      onClick={() =>
+                        setShowCn((v) => {
+                          saveShowCn(!v);
+                          return !v;
+                        })
+                      }
                       className="px-2.5 py-1 border border-line rounded text-[12px] text-sub hover:text-ink"
                     >
                       {showCn ? "显示英文" : "显示中文"}
-                    </button>
-                    <button
-                      onClick={() => navigate(`/conversations/${conv.id}`)}
-                      className="px-3 py-1 bg-accent text-white rounded text-[12px] font-medium hover:bg-accent/90"
-                    >
-                      打开完整会话 →
                     </button>
                   </div>
                 </div>
               </div>
               <div className="flex-1 px-6 py-5 overflow-y-auto">
+                <PendingReviewCard items={conv.timeline} onRefresh={refresh} />
                 <Timeline items={conv.timeline} showCn={showCn} onRefresh={refresh} />
                 <ReplyDraftEditor items={conv.timeline} onChanged={refresh} />
                 <div className="mt-4">

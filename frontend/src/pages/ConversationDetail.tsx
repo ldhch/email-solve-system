@@ -2,11 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { dataOf, errorText, http } from "../api/client";
 import { Layout } from "../components/Layout";
+import { PendingReviewCard } from "../components/PendingReviewCard";
 import { ReplyDraftEditor } from "../components/ReplyDraftEditor";
 import { ReplyEditor } from "../components/ReplyEditor";
 import { RiskTag } from "../components/RiskTag";
 import { Timeline, TimelineItem } from "../components/Timeline";
 import { formatLocal } from "../utils/format";
+import { loadShowCn, saveShowCn } from "../utils/langPref";
 
 interface ConversationData {
   id: number;
@@ -30,7 +32,7 @@ export default function ConversationDetail() {
   const { id } = useParams();
   const conversationId = Number(id);
   const [data, setData] = useState<ConversationData | null>(null);
-  const [showCn, setShowCn] = useState(false);
+  const [showCn, setShowCn] = useState(loadShowCn);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [splitOpen, setSplitOpen] = useState(false);
@@ -130,18 +132,18 @@ export default function ConversationDetail() {
           <span className="px-2 py-0.5 rounded bg-gray-100 text-gray-700">
             {STATUS_LABEL[data.status] || data.status}
           </span>
-          {data.retention_attempts > 0 && (
-            <span className="text-purple-600">
-              挽留轮次：{data.retention_attempts}/2
-            </span>
-          )}
           {data.sla_deadline && (
             <span className="text-red-600">
-              SLA 截止：{formatLocal(data.sla_deadline)}
+              请在 {formatLocal(data.sla_deadline)} 前回复
             </span>
           )}
           <button
-            onClick={() => setShowCn((v) => !v)}
+            onClick={() =>
+              setShowCn((v) => {
+                saveShowCn(!v);
+                return !v;
+              })
+            }
             className="ml-auto px-3 py-1 border border-gray-300 rounded text-sm"
           >
             {showCn ? "显示英文" : "显示中文"}
@@ -168,22 +170,29 @@ export default function ConversationDetail() {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2 mb-4">
-        <button
-          onClick={() => setSplitOpen((v) => !v)}
-          disabled={!splitCandidates.length}
-          title={!splitCandidates.length ? "会话邮件不足，无需拆分" : undefined}
-          className="px-3 py-1 border border-gray-300 rounded text-sm disabled:opacity-40"
-        >
-          拆分会话
-        </button>
-        <button
-          onClick={() => setMergeOpen((v) => !v)}
-          className="px-3 py-1 border border-gray-300 rounded text-sm"
-        >
-          合并会话
-        </button>
-      </div>
+      {/* Advanced thread-management operations stay out of the boss's way by
+          default; they're rare and easy to mis-trigger. */}
+      <details className="mb-4">
+        <summary className="w-fit cursor-pointer select-none text-[12.5px] text-sub hover:text-ink">
+          高级操作（拆分会话 / 合并会话）
+        </summary>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setSplitOpen((v) => !v)}
+            disabled={!splitCandidates.length}
+            title={!splitCandidates.length ? "会话邮件不足，无需拆分" : undefined}
+            className="px-3 py-1 border border-gray-300 rounded text-sm disabled:opacity-40"
+          >
+            拆分会话
+          </button>
+          <button
+            onClick={() => setMergeOpen((v) => !v)}
+            className="px-3 py-1 border border-gray-300 rounded text-sm"
+          >
+            合并会话
+          </button>
+        </div>
+      </details>
 
       {splitOpen && (
         <div className="mb-4 bg-gray-50 rounded-lg border border-gray-200 p-3">
@@ -262,6 +271,8 @@ export default function ConversationDetail() {
           </div>
         </div>
       )}
+
+      <PendingReviewCard items={data.timeline} onRefresh={load} />
 
       <Timeline items={data.timeline} showCn={showCn} onRefresh={load} />
 

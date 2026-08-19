@@ -67,9 +67,6 @@ export function Layout({ children }: { children: ReactNode }) {
               <NavLink to="/settings" className={linkCls}>
                 设置
               </NavLink>
-              <NavLink to="/audit" className={linkCls}>
-                审计日志
-              </NavLink>
             </nav>
           </div>
           <button

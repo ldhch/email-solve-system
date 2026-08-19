@@ -21,6 +21,8 @@ export default function Tickets() {
   const [filter, setFilter] = useState<"pending" | "in_progress" | "resolved">("pending");
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const [resolveTarget, setResolveTarget] = useState<TicketItem | null>(null);
+  const [ownerReply, setOwnerReply] = useState("");
   const navigate = useNavigate();
 
   const load = useCallback(async () => {
@@ -51,9 +53,15 @@ export default function Tickets() {
     }
   }
 
-  async function resolve(ticket: TicketItem) {
-    const ownerReply = window.prompt("请填写给客户的中文回复（解决工单必填）：");
-    if (ownerReply === null) return;
+  function openResolve(ticket: TicketItem) {
+    setResolveTarget(ticket);
+    setOwnerReply("");
+    setError("");
+  }
+
+  async function confirmResolve() {
+    const ticket = resolveTarget;
+    if (!ticket) return;
     if (!ownerReply.trim()) {
       setError("必须填写中文回复才能解决工单");
       return;
@@ -65,6 +73,7 @@ export default function Tickets() {
         status: "resolved",
         owner_reply_cn: ownerReply.trim(),
       });
+      setResolveTarget(null);
       await load();
     } catch (err) {
       setError(errorText(err));
@@ -164,7 +173,7 @@ export default function Tickets() {
                       {t.status !== "resolved" && (
                         <button
                           disabled={busyId === t.id}
-                          onClick={() => resolve(t)}
+                          onClick={() => openResolve(t)}
                           className="px-2 py-1 bg-green-600 text-white rounded text-xs disabled:opacity-50"
                         >
                           解决
@@ -193,6 +202,41 @@ export default function Tickets() {
                 className="px-3 py-1 border border-gray-300 rounded disabled:opacity-40"
               >
                 下一页
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {resolveTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+          <div className="w-full max-w-lg rounded-lg bg-white p-5 shadow-xl">
+            <h3 className="text-sm font-semibold text-gray-800 mb-1">解决工单</h3>
+            <p className="text-xs text-gray-500 mb-3">
+              给客户写一句中文回复，系统翻译为英文发送后，该工单标记为已解决。
+            </p>
+            <textarea
+              autoFocus
+              value={ownerReply}
+              onChange={(e) => setOwnerReply(e.target.value)}
+              rows={4}
+              placeholder="在这里输入给客户的中文回复…"
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            {error && <p className="text-sm text-red-600 mt-2">{error}</p>}
+            <div className="mt-3 flex gap-2 justify-end">
+              <button
+                onClick={() => setResolveTarget(null)}
+                className="px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-600"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmResolve}
+                disabled={busyId === resolveTarget.id}
+                className="px-3 py-1.5 bg-green-600 text-white rounded text-sm disabled:opacity-50"
+              >
+                {busyId === resolveTarget.id ? "处理中…" : "翻译并解决"}
               </button>
             </div>
           </div>
