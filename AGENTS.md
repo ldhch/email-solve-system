@@ -8,6 +8,7 @@
 - **使用者**：一位不懂英文的老板（唯一业务决策人），单人使用
 - **业务核心**：7×24 自动处理 30~50 封/天英文售后邮件；简单问题 AI 直接回，高风险问题先发安抚信再转人工；对客英文、后台中文
 - **部署目标**：Hostinger VPS（Linux），单机 Docker Compose
+- **远程仓库**：`https://github.com/ldhch/email-solve-system.git`（git remote 名为 `origin`）
 
 ## 二、权威文档（每次动手前必须先读）
 
