@@ -24,6 +24,9 @@ class Reply(Base):
     content_en: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
     reply_type: Mapped[str] = mapped_column(String(40), nullable=False, default="general")
+    # "system" for AI-generated pipeline replies; "manual" for owner-authored
+    # manual replies or drafts edited by the owner before sending.
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="system")
     review_user_id: Mapped[int | None] = mapped_column(Integer)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

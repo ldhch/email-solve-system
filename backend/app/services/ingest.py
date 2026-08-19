@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 from email import message_from_bytes
 from email.header import decode_header
 from email.utils import getaddresses, parsedate_tz
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,9 @@ MAX_BODY_BYTES = 2 * 1024 * 1024  # truncate body beyond 2 MB (TECH N-2)
 WARN_RAW_BYTES = 5 * 1024 * 1024  # log warning beyond 5 MB raw email
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # drop oversized email attachments (disk-fill guard)
 _MSGID_TAG_RE = re.compile(r"^<|>$")
+_IGNORED_TAG_RE = re.compile(
+    r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL
+)
 
 
 @dataclass
@@ -121,8 +125,86 @@ def _sanitize_html(html: str) -> str:
     return bleach.clean(html, tags=["p", "br", "a"], attributes={"a": ["href"]}, strip=True)
 
 
+class _HtmlToTextParser(HTMLParser):
+    """Convert the sanitized email subset into structured plain text."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skip_depth = 0
+        self._anchor_href: str | None = None
+
+    def _ensure_single_newline(self) -> None:
+        if self.parts and not self.parts[-1].endswith("\n"):
+            self.parts.append("\n")
+
+    def _ensure_blank_line(self) -> None:
+        if not self.parts:
+            return
+        if self.parts[-1].endswith("\n\n"):
+            return
+        if self.parts[-1].endswith("\n"):
+            self.parts.append("\n")
+        else:
+            self.parts.append("\n\n")
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if tag in ("script", "style"):
+            self._skip_depth += 1
+            return
+        if tag in ("p", "div", "section"):
+            self._ensure_blank_line()
+        elif tag == "br":
+            self._ensure_single_newline()
+        elif tag == "li":
+            self._ensure_single_newline()
+            self.parts.append("- ")
+        elif tag == "a":
+            self._anchor_href = dict(attrs).get("href", "")
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        if tag.lower() == "br":
+            self._ensure_single_newline()
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in ("script", "style"):
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif tag in ("p", "div", "section"):
+            self._ensure_blank_line()
+        elif tag == "li":
+            self._ensure_single_newline()
+        elif tag == "a" and self._anchor_href is not None:
+            if self._anchor_href:
+                self.parts.append(f" ({self._anchor_href})")
+            self._anchor_href = None
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        text = re.sub(r"\s+", " ", data.replace("\xa0", " "))
+        if text and text != " ":
+            self.parts.append(text)
+
+    def text(self) -> str:
+        return "".join(self.parts).strip()
+
+
 def _html_to_text(html: str) -> str:
-    return bleach.clean(html, tags=[], strip=True)
+    """Convert HTML email bodies into paragraph-separated plain text."""
+
+    html = _IGNORED_TAG_RE.sub(" ", html)
+    cleaned = bleach.clean(
+        html,
+        tags=["p", "div", "section", "br", "ul", "ol", "li", "b", "strong", "a"],
+        attributes={"a": ["href"]},
+        strip=True,
+    )
+    parser = _HtmlToTextParser()
+    parser.feed(cleaned)
+    parser.close()
+    return parser.text()
 
 
 def _truncate(text: str | None, limit: int = MAX_BODY_BYTES) -> str | None:

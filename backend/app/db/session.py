@@ -137,6 +137,20 @@ def _ensure_email_pending_after_pause_column(engine: Engine) -> None:
             )
 
 
+def _ensure_reply_source_column(engine: Engine) -> None:
+    """Add ``replies.source`` to DBs created before the column existed."""
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(replies)"))}
+        if "source" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE replies "
+                    "ADD COLUMN source VARCHAR(20) NOT NULL DEFAULT 'system'"
+                )
+            )
+
+
 def init_db(settings: Settings | None = None) -> None:
     """Create all tables (create_all) and seed defaults. No migrations."""
 
@@ -149,6 +163,7 @@ def init_db(settings: Settings | None = None) -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_email_is_read_column(engine)
     _ensure_email_pending_after_pause_column(engine)
+    _ensure_reply_source_column(engine)
     seed(settings)
 
 

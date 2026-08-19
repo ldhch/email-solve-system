@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from sqlalchemy import select
 
 import app.api.conversations as conversations_module
@@ -75,6 +77,7 @@ def _seed_conversation(
                 content_en=reply.get("content_en", "English content"),
                 status=reply.get("status", "pending_review"),
                 reply_type=reply.get("reply_type", "general"),
+                source=reply.get("source", "system"),
                 created_at=utcnow(),
             )
             db.add(reply_row)
@@ -231,6 +234,107 @@ def test_inbox_conversation_read(settings, session_factory) -> None:
         close_client(client)
 
 
+def test_inbox_unread_sort_and_conv_status(settings, session_factory) -> None:
+    ids_a = _seed_conversation(session_factory, customer_email="a@example.com")
+    ids_b = _seed_conversation(session_factory, customer_email="b@example.com")
+    with session_factory() as db:
+        conv_a = db.get(Conversation, ids_a["conversation_id"])
+        conv_a.status = "resolved"
+        email_a = db.get(Email, ids_a["email_ids"][0])
+        email_a.is_read = True
+        db.commit()
+
+    client = _authed_client(settings, session_factory)
+    try:
+        unread = api(client, "GET", "/api/v1/inbox", params={"sort": "unread"})
+        assert unread.status_code == 200
+        items = unread.json()["data"]["items"]
+        assert [i["id"] for i in items] == [
+            ids_b["conversation_id"],
+            ids_a["conversation_id"],
+        ]
+
+        resolved = api(
+            client, "GET", "/api/v1/inbox", params={"conv_status": "resolved"}
+        )
+        items = resolved.json()["data"]["items"]
+        assert [i["id"] for i in items] == [ids_a["conversation_id"]]
+
+        unread_only = api(
+            client, "GET", "/api/v1/inbox", params={"unread_only": True}
+        )
+        items = unread_only.json()["data"]["items"]
+        assert [i["id"] for i in items] == [ids_b["conversation_id"]]
+    finally:
+        close_client(client)
+
+
+def test_inbox_risk_sort(settings, session_factory) -> None:
+    ids_low = _seed_conversation(session_factory, customer_email="low@example.com")
+    ids_high = _seed_conversation(session_factory, customer_email="high@example.com")
+    with session_factory() as db:
+        db.get(Conversation, ids_low["conversation_id"]).risk_level = "low"
+        db.get(Conversation, ids_high["conversation_id"]).risk_level = "high"
+        db.get(Email, ids_low["email_ids"][0]).risk_level = "low"
+        db.get(Email, ids_high["email_ids"][0]).risk_level = "high"
+        db.commit()
+
+    client = _authed_client(settings, session_factory)
+    try:
+        resp = api(client, "GET", "/api/v1/inbox", params={"sort": "risk"})
+        assert resp.status_code == 200
+        items = resp.json()["data"]["items"]
+        assert [i["id"] for i in items] == [
+            ids_high["conversation_id"],
+            ids_low["conversation_id"],
+        ]
+    finally:
+        close_client(client)
+
+
+def test_inbox_sla_flags(settings, session_factory) -> None:
+    overdue = _seed_conversation(
+        session_factory,
+        customer_email="overdue@example.com",
+        ticket={"status": "pending"},
+    )
+    near = _seed_conversation(
+        session_factory,
+        customer_email="near@example.com",
+        ticket={"status": "pending"},
+    )
+    plain = _seed_conversation(
+        session_factory,
+        customer_email="plain@example.com",
+    )
+    with session_factory() as db:
+        db.get(Ticket, overdue["ticket_id"]).sla_deadline = utcnow() - timedelta(
+            hours=1
+        )
+        db.get(Ticket, near["ticket_id"]).sla_deadline = utcnow() + timedelta(hours=1)
+        db.commit()
+
+    client = _authed_client(settings, session_factory)
+    try:
+        body = api(client, "GET", "/api/v1/inbox").json()["data"]
+        by_id = {item["id"]: item for item in body["items"]}
+
+        overdue_row = by_id[overdue["conversation_id"]]
+        assert overdue_row["sla_breached"] is True
+        assert overdue_row["sla_near"] is False
+
+        near_row = by_id[near["conversation_id"]]
+        assert near_row["sla_breached"] is False
+        assert near_row["sla_near"] is True
+
+        plain_row = by_id[plain["conversation_id"]]
+        assert plain_row["sla_deadline"] is None
+        assert plain_row["sla_breached"] is False
+        assert plain_row["sla_near"] is False
+    finally:
+        close_client(client)
+
+
 def test_conversation_detail_timeline(settings, session_factory) -> None:
     ids = _seed_conversation(
         session_factory,
@@ -250,6 +354,7 @@ def test_conversation_detail_timeline(settings, session_factory) -> None:
         reply_item = next(t for t in data["timeline"] if t["type"] == "reply")
         assert reply_item["status"] == "sent"
         assert reply_item["content_en"] == "Thank you!"
+        assert reply_item["source"] == "system"
     finally:
         close_client(client)
 
@@ -291,6 +396,7 @@ def test_manual_reply_translates_and_sends(
         with session_factory() as db:
             reply = db.get(Reply, data["reply_id"])
             assert reply.status == "sent"
+            assert reply.source == "manual"
             actions = {a.action for a in db.query(AuditLog).all()}
         assert "manual_reply_sent" in actions
     finally:
@@ -334,6 +440,7 @@ def test_approve_reject_edit_send_draft(
         with session_factory() as db:
             reply = db.get(Reply, ids["reply_id"])
             assert reply.status == "sent"
+            assert reply.source == "manual"
 
         # approve an already-sent reply must conflict
         conflict = api(client, "POST", f"/api/v1/replies/{ids['reply_id']}/approve")
@@ -358,6 +465,7 @@ def test_approve_pending_review_sends(settings, session_factory, monkeypatch) ->
             reply = db.get(Reply, ids["reply_id"])
             assert reply.status == "sent"
             assert reply.review_user_id is not None
+            assert reply.source == "system"
     finally:
         close_client(client)
 

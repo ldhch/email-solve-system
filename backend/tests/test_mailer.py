@@ -9,6 +9,7 @@ from app.core.exceptions import SMTPError, SMTPRateLimitError
 from app.models.reply import Reply
 from app.services.audit import utcnow
 from app.services.mailer import MailerService, build_message
+from app.services.replier import markdown_to_html
 
 from conftest import FakeIMAPAppend, FakeSMTP
 
@@ -45,6 +46,55 @@ def test_build_message_keeps_existing_re_prefix() -> None:
     settings = Settings(email_username="bot@example.com", llm_provider="mock")
     msg = build_message(_reply(), "c@example.com", "Re: Question", settings)
     assert msg["Subject"] == "Re: Question"
+
+
+def test_markdown_to_html_renders_light_markdown() -> None:
+    rendered = markdown_to_html(
+        "Hello **bold** and *italic*.\n\n"
+        "- One\n"
+        "- **Two**\n\n"
+        "Line 1\nLine 2"
+    )
+    assert rendered == (
+        "<p>Hello <strong>bold</strong> and <em>italic</em>.</p>"
+        "<ul><li>One</li><li><strong>Two</strong></li></ul>"
+        "<p>Line 1<br>Line 2</p>"
+    )
+
+
+def test_markdown_to_html_escapes_html() -> None:
+    assert markdown_to_html("<script>alert(1)</script> & ok") == (
+        "<p>&lt;script&gt;alert(1)&lt;/script&gt; &amp; ok</p>"
+    )
+
+
+def test_build_message_contains_multipart_alternative() -> None:
+    msg = build_message(_reply(), "c@example.com", "Question", Settings(
+        email_username="bot@example.com",
+        llm_provider="mock",
+    ))
+    assert msg.is_multipart()
+    parts = list(msg.iter_parts())
+    assert [p.get_content_type() for p in parts] == ["text/plain", "text/html"]
+    assert parts[0].get_content().strip() == "Thank you!"
+    html_body = parts[1].get_content()
+    assert "background-color:#ffffff" in html_body
+    assert "#2E5D86" in html_body
+    assert '<p style="margin:0 0 12px; line-height:1.6;">Thank you!</p>' in html_body
+    assert "The LBORA Team" in html_body
+
+
+def test_build_message_html_sanitizes_markdown_injection() -> None:
+    reply = _reply()
+    reply.content_en = "Hello <script>alert(1)</script><img src=x onerror=alert(1)>"
+    msg = build_message(reply, "c@example.com", "Question", Settings(
+        email_username="bot@example.com",
+        llm_provider="mock",
+    ))
+    html_body = list(msg.iter_parts())[1].get_content()
+    assert "<script" not in html_body
+    assert "<img" not in html_body
+    assert "alert(1)" in html_body
 
 
 def test_send_success(db, settings, fake_smtp_class) -> None:

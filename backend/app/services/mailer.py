@@ -16,6 +16,7 @@ from datetime import timedelta
 from email.message import EmailMessage
 from email.utils import formatdate
 
+import bleach
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,58 @@ from app.models.reply import Reply
 from app.services.audit import utcnow
 
 logger = logging.getLogger(__name__)
+
+_HTML_BODY_TAGS = ["p", "br", "ul", "li", "strong", "em", "a"]
+_HTML_BODY_ATTRIBUTES = {"a": ["href"]}
+_SIGNATURE_BLOCK_HTML = (
+    '<p style="margin:32px 0 0; color:#2E5D86; font-weight:600;">'
+    "Best regards,"
+    "</p>"
+    '<p style="margin:0; color:#2E5D86; font-weight:600;">'
+    "The LBORA Team"
+    "</p>"
+)
+
+
+def _brand_html_body(content_en: str) -> str:
+    """Render reply content as a branded HTML email body."""
+
+    from app.services.replier import markdown_to_html
+
+    body = markdown_to_html(content_en)
+    body = bleach.clean(
+        body,
+        tags=_HTML_BODY_TAGS,
+        attributes=_HTML_BODY_ATTRIBUTES,
+        strip=True,
+    )
+    body = body.replace(
+        "<p>Best regards,<br>The LBORA Team</p>", _SIGNATURE_BLOCK_HTML
+    )
+    body = body.replace(
+        "<p>Best regards,</p><p>The LBORA Team</p>", _SIGNATURE_BLOCK_HTML
+    )
+    if "Best regards," not in content_en and "The LBORA Team" not in content_en:
+        body += _SIGNATURE_BLOCK_HTML
+
+    body = body.replace('<p>', '<p style="margin:0 0 12px; line-height:1.6;">')
+    body = body.replace('<ul>', '<ul style="margin:0 0 12px; padding-left:20px;">')
+    body = body.replace('<li>', '<li style="margin:0 0 6px; line-height:1.6;">')
+    body = body.replace(
+        "<a ", '<a style="color:#2E5D86; text-decoration:underline;" '
+    )
+    body = body.replace("<strong>", '<strong style="font-weight:600;">')
+    body = body.replace("<em>", '<em style="font-style:italic;">')
+
+    return (
+        '<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+        '<body style="margin:0; padding:0; background-color:#ffffff; '
+        "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
+        'Helvetica,Arial,sans-serif; color:#1F2937;">'
+        '<div style="max-width:640px; margin:0 auto; padding:24px;">'
+        f"{body}"
+        "</div></body></html>"
+    )
 
 
 def build_message(reply, to_email: str, subject: str, settings: Settings) -> EmailMessage:
@@ -50,6 +103,7 @@ def build_message(reply, to_email: str, subject: str, settings: Settings) -> Ema
     if references:
         msg["References"] = " ".join(references)
     msg.set_content(reply.content_en)
+    msg.add_alternative(_brand_html_body(reply.content_en), subtype="html")
     return msg
 
 

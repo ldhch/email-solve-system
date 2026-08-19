@@ -142,6 +142,7 @@ async def conversation_detail(
                 "content_cn": r.content_cn,
                 "status": r.status,
                 "reply_type": r.reply_type,
+                "source": r.source,
                 "at": _fmt(r.sent_at or r.created_at),
             }
         )
@@ -235,6 +236,7 @@ async def manual_reply(
         status="draft",
         content_cn=payload.content_cn,
     )
+    reply.source = "manual"
     try:
         _make_mailer(db, settings).send(
             reply, to_email=latest.from_email, subject=latest.subject
@@ -433,6 +435,7 @@ async def send_draft(
     email = db.get(Email, reply.email_id)
     if email is None:
         raise HTTPException(status_code=409, detail="NO_EMAIL")
+    reply.source = "manual"
     try:
         _make_mailer(db, settings).send(
             reply, to_email=email.from_email, subject=email.subject

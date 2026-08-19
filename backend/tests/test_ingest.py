@@ -10,7 +10,7 @@ from sqlalchemy import select
 from app.llm.client import MockLLMClient
 from app.models.attachment import Attachment
 from app.models.email import Email
-from app.services.ingest import IngestService, parse_email
+from app.services.ingest import IngestService, _html_to_text, parse_email
 from app.services.mailer import MailerService
 
 from conftest import FakeSMTP, make_raw_email
@@ -32,6 +32,26 @@ def test_parse_plain_email() -> None:
     assert parsed.to_email == "bot@example.com"
     assert "has my package shipped yet?" in parsed.body_text
     assert parsed.has_attachments is False
+
+
+def test_html_to_text_preserves_paragraphs_lists_and_links() -> None:
+    html = (
+        '<html><body><script>alert(1)</script>'
+        '<p>Hello <b>world</b>&nbsp;!</p>'
+        "<ul><li>First item</li><li>Second item</li></ul>"
+        '<div>See <a href="https://example.com/x?a=1&amp;b=2">details</a></div>'
+        "</body></html>"
+    )
+    assert _html_to_text(html) == (
+        "Hello world !\n\n"
+        "- First item\n"
+        "- Second item\n\n"
+        "See details (https://example.com/x?a=1&b=2)"
+    )
+
+
+def test_html_to_text_keeps_script_content_out_of_body_text() -> None:
+    assert "alert" not in _html_to_text("<script>alert(1)</script><p>Safe</p>")
 
 
 def test_parse_strips_angle_brackets_and_supports_references() -> None:

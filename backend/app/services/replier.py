@@ -9,7 +9,9 @@ facts are allowed in the prompt.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
+from html import escape
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -34,8 +36,70 @@ EMAIL_FORMAT_RULE = (
     'line ("Dear [customer first name]," — use the customer\'s name from the '
     'conversation when available, otherwise "Hi there,"), the reply body, '
     'a closing "Best regards,", and a signature "The LBORA Team". '
-    "Never invent a customer name."
+    "Never invent a customer name. "
+    "Format the body with light Markdown: use **bold** for key points, "
+    "- for unordered list items, and blank lines between paragraphs. "
+    "Do not use heading levels, images, or tables."
 )
+
+
+def _inline_markdown_to_html(text: str) -> str:
+    """Convert inline light Markdown to sanitized HTML fragments."""
+
+    escaped = escape(text, quote=False)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(
+        r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)",
+        r"<em>\1</em>",
+        escaped,
+    )
+    return escaped
+
+
+def markdown_to_html(text: str) -> str:
+    """Render the supported light Markdown subset as safe HTML.
+
+    Supported syntax: **bold**, *italic*, line-start "- " list items, blank
+    lines between paragraphs, and single newlines inside a paragraph.
+    """
+
+    if not text:
+        return ""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    blocks: list[str] = []
+    paragraph: list[str] = []
+    list_items: list[str] = []
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph
+        if paragraph:
+            blocks.append(
+                "<p>" + "<br>".join(_inline_markdown_to_html(line) for line in paragraph) + "</p>"
+            )
+            paragraph = []
+
+    def flush_list() -> None:
+        nonlocal list_items
+        if list_items:
+            items = "".join(
+                f"<li>{_inline_markdown_to_html(item)}</li>" for item in list_items
+            )
+            blocks.append(f"<ul>{items}</ul>")
+            list_items = []
+
+    for line in normalized.split("\n"):
+        if not line.strip():
+            flush_paragraph()
+            flush_list()
+        elif line.startswith("- "):
+            flush_paragraph()
+            list_items.append(line[2:].strip())
+        else:
+            flush_list()
+            paragraph.append(line.strip())
+    flush_paragraph()
+    flush_list()
+    return "".join(blocks)
 
 GENERATE_SYSTEM_PROMPT = """\
 You are a professional customer-support agent writing English replies for a
@@ -303,6 +367,7 @@ class ReplierService:
             content_cn=content_cn,
             status=status,
             reply_type=reply_type,
+            source="system",
             created_at=utcnow(),
         )
         self.db.add(reply)
