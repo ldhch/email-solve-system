@@ -147,7 +147,7 @@ export function Timeline({
             <div className={`rounded-lg px-4 py-3 ${CARD_STYLE[tone]}`}>
               <div className="mb-2 flex flex-wrap items-center gap-2 text-[11.5px] text-sub">
                 <span
-                  className={`px-2 py-0.5 rounded font-medium ${BADGE_STYLE[tone]}`}
+                  className={`px-2.5 py-1 rounded text-[12.5px] font-medium ${BADGE_STYLE[tone]}`}
                 >
                   {typeLabel(item)}
                 </span>
