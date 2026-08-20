@@ -93,13 +93,24 @@ function quoteDepth(line: string): number {
 function chunkEmailText(text: string): BodyChunk[] {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   const chunks: BodyChunk[] = [];
+  let inQuoted = false;
 
   for (const raw of lines) {
     const trimmed = raw.trim();
     const last = chunks[chunks.length - 1];
 
     if (/^>+/.test(trimmed)) {
+      // Classic ">" quoting — once seen, everything after stays quoted.
+      if (!inQuoted) inQuoted = true;
       appendQuote(chunks, trimmed.replace(/^[>\s]+/, ""), quoteDepth(trimmed));
+    } else if (isRoundHead(trimmed)) {
+      // Unmarked quote header ("On … wrote:" with no ">" prefix) — Yahoo and
+      // Gmail embed the previous thread inline; treat it and everything after
+      // as quoted history so embedded HTML/CSS never leaks into the fresh body.
+      inQuoted = true;
+      appendQuote(chunks, trimmed.replace(/^[>\s]+/, ""), quoteDepth(trimmed));
+    } else if (inQuoted) {
+      appendQuote(chunks, trimmed, 0);
     } else if (/^[-*•]\s+/.test(trimmed)) {
       appendText(chunks, "list", trimmed.replace(/^[-*•]\s+/, ""));
     } else if (!trimmed) {
@@ -240,6 +251,69 @@ function parseQuotedRounds(lines: QuoteLine[]): QuoteMsg[] {
   return rounds.reverse();
 }
 
+// Embedded quoted replies (Yahoo/Gmail) carry the original HTML as plain
+// text: inline CSS prefixed with #yivNNN, @media rules and "|" grid lines.
+// Drop the debris before display, keeping the readable text.
+function stripCssDebris(content: string): string {
+  return content
+    .split("\n")
+    .filter((l) => {
+      const t = l.trim();
+      return !/#yiv\d+|@media|!important/.test(t) && !/^[|][\s|]*$/.test(t);
+    })
+    .map((l) => l.replace(/^\s*\|+\s*/, "").replace(/\s*\|+\s*$/, ""))
+    .join("\n");
+}
+
+// Protocol plain-text drops the original list bullets. Detect list blocks —
+// a line ending with ":" as the lead-in, followed by >=2 consecutive short
+// lines — and re-add "• " so long letters read like the mail client. The
+// rules are conservative: a blank line, an overlong line, or another ":"-
+// ending line stops the block, so ordinary paragraphs are never bulleted.
+function markListBullets(content: string): string {
+  const lines = content.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/:$/.test(lines[i].trim())) {
+      out.push(lines[i]);
+      continue;
+    }
+    let j = i + 1;
+    while (j < lines.length) {
+      const t = lines[j].trim();
+      if (!t || t.length > 90 || /:$/.test(t)) break;
+      j++;
+    }
+    const count = j - (i + 1);
+    if (count >= 2) {
+      out.push(lines[i]);
+      for (let k = i + 1; k < j; k++) {
+        // Never double-bullet a line that already carries a marker.
+        out.push(/^[-*•]\s+/.test(lines[k].trim()) ? lines[k] : "• " + lines[k]);
+      }
+      i = j - 1;
+    } else {
+      out.push(lines[i]);
+    }
+  }
+  return out.join("\n");
+}
+
+// Summary mode shows the Chinese digest; if none was generated, fall back to
+// the freshest part of the body with quoted history stripped, so the boss
+// never sees the raw ">" thread in the digest.
+function freshPreview(content?: string | null): string {
+  const chunks = chunkEmailText(normalizeSpacing(content));
+  return chunks
+    .filter(
+      (c): c is Extract<BodyChunk, { kind: "para" | "list" | "sig" }> =>
+        c.kind !== "quote",
+    )
+    .flatMap((c) => c.lines)
+    .join("\n")
+    .slice(0, 300);
+}
+
 // ---- Shared pieces ----
 
 // The email's fresh body rendered as a letter (greeting, paragraphs, lists and
@@ -336,7 +410,7 @@ function HistoryBlock({
         />
         {msg.content && (
           <div className="text-[15px] leading-[1.45] whitespace-pre-wrap text-ink">
-            {msg.content}
+            {markListBullets(stripCssDebris(msg.content))}
           </div>
         )}
       </div>
@@ -409,9 +483,7 @@ export function Timeline({
               at={latestAt}
             />
             <div className="text-[16px] leading-normal whitespace-pre-wrap text-ink">
-              {showCn
-                ? latest.summary_cn || normalizeSpacing(latest.content)
-                : normalizeSpacing(latest.content)}
+              {latest.summary_cn || freshPreview(latest.content)}
             </div>
           </div>
         </li>
