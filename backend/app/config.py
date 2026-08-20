@@ -96,11 +96,14 @@ class Settings(BaseSettings):
 
     # Scheduling / business rules
     session_auto_close_days: int = 30
-    conversation_subject_similarity_threshold: float = 0.85
+    conversation_subject_similarity_threshold: float = 0.75
     low_confidence_threshold: float = 0.6
     retention_max_attempts: int = 2
     compensation_max_usd: float = 20.0
     conversation_window_days: int = 7
+    # How many past message rounds the LLM sees when drafting a reply. Bumped
+    # from 6 to 12 so long threads keep their early promises/context.
+    reply_history_max_turns: int = 12
     poll_interval_seconds: int = 90
     # Optional return-handling instructions appended to "release" replies.
     # Empty => the reply asks the customer for their order number first

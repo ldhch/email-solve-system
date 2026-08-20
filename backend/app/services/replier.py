@@ -258,7 +258,8 @@ class ReplierService:
         timeline.sort(key=lambda item: item[0])
 
         lines = []
-        for _, speaker, content in timeline[-6:]:
+        max_turns = self.settings.reply_history_max_turns
+        for _, speaker, content in timeline[-max_turns:]:
             lines.append(f"[{speaker}] {content}\n")
         for email in sorted(current_emails, key=lambda e: (e.received_at, e.id)):
             lines.append(f"[customer] {email.body_text or ''}\n")
