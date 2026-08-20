@@ -158,66 +158,86 @@ interface QuoteMsg {
   fromEmail: string;
   at: string;
   content: string;
-  ts: number;
 }
 
 function isRoundHead(line: string): boolean {
   return /写道：|wrote:/.test(line) && /@/.test(line);
 }
 
-function parseRoundHead(line: string): { email: string; at: string } {
-  const email =
-    line.match(/([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/)?.[1] ?? "";
-  const zh = line.match(/(20\d{2}年\d{1,2}月\d{1,2}日[^，,]*?)(?=[，,]\s*\S+@)/);
-  const en = line.match(/^On\s+(.{1,80}?),?\s*\S+@/);
-  const at = zh?.[1] ?? (en ? "On " + en[1] : line.replace(/\s*[，,]\s*\S+@.*/, "").trim());
-  return { email, at };
-}
+const EMAIL_RE = /([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/;
 
-function parseCnTime(s: string): number | null {
-  const m = s.match(/(\d{4})年(\d{1,2})月(\d{1,2})日[^\d]{0,6}(\d{1,2})[:：](\d{1,2})/);
-  if (!m) return null;
-  let h = +m[4];
-  if (/下午|晚上|傍晚|PM/i.test(s)) h = h === 12 ? 12 : h + 12;
-  if (/上午|凌晨|早上|AM/i.test(s)) h = h === 12 ? 0 : h;
-  return new Date(+m[1], +m[2] - 1, +m[3], h, +m[5]).getTime();
-}
+// Parse a header timestamp in any of the shapes we see in the wild: standard
+// Chinese "2026年8月18日晚上7:17", standard English "Aug 17, 2026 at 7:17 PM",
+// and Apple Mail's mixed "8月 18 2026, at 7:31 早上". Extract the year, month,
+// day and clock time, then normalize the AM/PM-ish marker.
+function parseAnyTime(s: string): number | null {
+  const yearM = s.match(/(20\d{2})/);
+  if (!yearM) return null;
+  const year = +yearM[1];
 
-function parseEnTime(s: string): number | null {
-  const m = s.match(/([A-Za-z]{3,})\.?\s+(\d{1,2}),?\s+(\d{4}),?\s+at\s+(\d{1,2}):(\d{1,2})\s*([AP]M)/i);
-  if (!m) return null;
   const months: Record<string, number> = {
-    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
-    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+    jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+    jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
   };
-  const mon = months[m[1].slice(0, 3).toLowerCase()];
-  if (mon === undefined) return null;
-  let h = +m[4];
-  if (/PM/i.test(m[6])) h = h === 12 ? 12 : h + 12;
-  if (/AM/i.test(m[6])) h = h === 12 ? 0 : h;
-  return new Date(+m[3], mon, +m[2], h, +m[5]).getTime();
+  let month: number | undefined;
+  const monthCn = s.match(/(\d{1,2})\s*月/);
+  const monthEn = s.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*/i);
+  if (monthCn) month = +monthCn[1];
+  else if (monthEn) month = months[monthEn[1].slice(0, 3).toLowerCase()];
+  if (!month || month < 1 || month > 12) return null;
+
+  const nums = [...s.matchAll(/(\d+)/g)].map((m) => +m[0]);
+  const day = nums.find(
+    (n) => n >= 1 && n <= 31 && n !== year && n !== month,
+  );
+  if (day == null) return null;
+
+  const timeM = s.match(/(\d{1,2})[:：](\d{1,2})/);
+  if (!timeM) return null;
+  let hour = +timeM[1];
+  const minute = +timeM[2];
+  if (/晚上|下午|傍晚|PM/i.test(s)) hour = hour === 12 ? 12 : hour + 12;
+  else if (/凌晨|上午|早上|AM/i.test(s)) hour = hour === 12 ? 0 : hour;
+
+  return new Date(year, month - 1, day, hour, minute).getTime();
 }
 
-// Unparseable headers sort last (kept in the thread, never dropped).
-function tsOf(at: string): number {
-  const t = at.startsWith("On ") ? parseEnTime(at) : parseCnTime(at);
-  return t ?? Number.MAX_SAFE_INTEGER;
+function formatShortDate(d: Date): string {
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${mm}-${dd} ${hh}:${mi}`;
 }
 
+function parseRoundHead(line: string): { email: string; ts: number | null } {
+  const email = line.match(EMAIL_RE)?.[1] ?? "";
+  return { email, ts: parseAnyTime(line) };
+}
+
+// Unparseable headers show "—" (never dropped).
 function parseQuotedRounds(lines: QuoteLine[]): QuoteMsg[] {
   const rounds: QuoteMsg[] = [];
   let cur: QuoteMsg | null = null;
   for (const { text } of lines) {
     if (isRoundHead(text)) {
       if (cur) rounds.push(cur);
-      const { email, at } = parseRoundHead(text);
-      cur = { fromEmail: email, at, content: "", ts: tsOf(at) };
+      const { email, ts } = parseRoundHead(text);
+      cur = {
+        fromEmail: email,
+        at: ts != null ? formatShortDate(new Date(ts)) : "—",
+        content: "",
+      };
     } else if (cur) {
       cur.content += (cur.content ? "\n" : "") + text;
     }
   }
   if (cur) rounds.push(cur);
-  return rounds.sort((a, b) => a.ts - b.ts);
+  // Quoted history is a reply chain: the newest quoted round appears first,
+  // the oldest last. Reversing that gives the true sending order, which is
+  // reliable across timezones — parsing each header's local timestamp would
+  // mix senders' timezones and misorder the thread.
+  return rounds.reverse();
 }
 
 // ---- Shared pieces ----
@@ -229,7 +249,7 @@ function EmailBodyView({ text }: { text: string }) {
   const chunks = chunkEmailText(normalizeSpacing(text));
 
   return (
-    <div className="space-y-2.5 text-[16px] leading-[1.7] text-ink">
+    <div className="space-y-2 text-[16px] leading-[1.5] text-ink">
       {chunks
         .filter((c) => c.kind !== "quote")
         .map((chunk, i) => {
@@ -282,8 +302,14 @@ function MessageHeader({
       >
         {label}
       </span>
-      {email && <span className="break-all">{email}</span>}
-      <span className="ml-auto shrink-0 tabular-nums">{at}</span>
+      {email && (
+        <span className="break-all text-[13px] font-medium text-ink">
+          {email}
+        </span>
+      )}
+      <span className="ml-auto shrink-0 text-[13px] text-ink tabular-nums">
+        {at}
+      </span>
     </div>
   );
 }
@@ -306,11 +332,13 @@ function HistoryBlock({
           label={isCustomer ? "客户来信" : "我方回复"}
           tone={tone}
           email={msg.fromEmail}
-          at={msg.at}
+          at={msg.at || "—"}
         />
-        <div className="text-[15px] leading-[1.75] whitespace-pre-wrap text-ink">
-          {msg.content}
-        </div>
+        {msg.content && (
+          <div className="text-[15px] leading-[1.45] whitespace-pre-wrap text-ink">
+            {msg.content}
+          </div>
+        )}
       </div>
     </li>
   );
