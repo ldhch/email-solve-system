@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { dataOf, errorText, http } from "../api/client";
 import { formatLocal } from "../utils/format";
 
@@ -130,78 +130,6 @@ function chunkEmailText(text: string): BodyChunk[] {
   return chunks.filter((c) => c.lines.some((l) => l.trim()));
 }
 
-// --- 历史对话：把引用的旧邮件切成一条条消息 --------------------------
-// 翻译后的历史是"时间，发件人 写道：\n<正文>" 的嵌套文本，且 `>` 层级在
-// 翻译里并不一致。所以按 header 切消息、按时间重排（旧→新），再用
-// 我方/客户配色区分收发，正文按书信排版。
-
-interface HistoryMsg {
-  sender: string;
-  email: string | null;
-  timeRaw: string;
-  ts: number;
-  mine: boolean;
-  body: string[];
-}
-
-const HEADER_RE = /^(.*?)，(.*?)\s*(?:写道|wrote)[：:]?$/;
-const DATE_RE = /^\d{4}年\d{1,2}月\d{1,2}日/;
-const TIME_RE =
-  /(\d{4})年(\d{1,2})月(\d{1,2})日(凌晨|早上|上午|中午|下午|晚上)?(\d{1,2})[:：](\d{1,2})/;
-
-// 翻译出的中文时间（"2026年8月17日晚上7:17"）转成可排序的时间戳。
-function parseTime(s: string): number {
-  const m = s.match(TIME_RE);
-  if (!m) return 0;
-  const [, , , , period, h, min] = m;
-  const y = +m[1];
-  const mo = +m[2];
-  const d = +m[3];
-  let hour = +h;
-  if (period === "凌晨" && hour === 12) hour = 0;
-  else if ((period === "中午" || period === "下午" || period === "晚上") && hour < 12)
-    hour += 12;
-  return Date.UTC(y, mo - 1, d, hour, +min);
-}
-
-// 把带 `>` 前缀的历史行切成"发件人 + 正文"的消息序列。
-function parseHistory(lines: string[]): HistoryMsg[] {
-  const msgs: HistoryMsg[] = [];
-  let cur: HistoryMsg | null = null;
-  for (const raw of lines) {
-    const line = raw.replace(/^>+\s*/, "").trim();
-    if (!line) {
-      if (cur) cur.body.push("");
-      continue;
-    }
-    const hm = line.match(HEADER_RE);
-    if (hm && DATE_RE.test(hm[1])) {
-      if (cur) msgs.push(cur);
-      const [, timeRaw, senderRaw] = hm;
-      const em = senderRaw.match(/<([^>]+)>/);
-      const email = em ? em[1] : senderRaw;
-      const sender = em ? senderRaw.replace(/\s*<[^>]+>/, "").trim() : senderRaw;
-      cur = {
-        sender: sender || email,
-        email,
-        timeRaw,
-        ts: parseTime(timeRaw),
-        mine: /shoplbora/i.test(email || "") || /shoplbora/i.test(sender),
-        body: [],
-      };
-    } else if (cur) {
-      cur.body.push(line);
-    } else {
-      // 首个 header 之前的零散行（异常情况）：并成一条"未知"消息，避免丢正文
-      if (!cur)
-        cur = { sender: "未知发件人", email: null, timeRaw: "", ts: 0, mine: false, body: [] };
-      cur.body.push(line);
-    }
-  }
-  if (cur) msgs.push(cur);
-  return msgs;
-}
-
 // 正文里的 http(s) 链接还原成可点击的蓝色链接（纯文本翻译保留了 URL）。
 function Linkify({ text }: { text: string }) {
   const nodes: ReactNode[] = [];
@@ -229,118 +157,11 @@ function Linkify({ text }: { text: string }) {
   return <>{nodes}</>;
 }
 
-// 单条消息的正文：按空行切段落，首行缩进两字符（书信格式），签名识别为小字。
-function MessageBody({ body }: { body: string[] }) {
-  const paras: string[][] = [];
-  let para: string[] = [];
-  for (const line of body) {
-    if (!line.trim()) {
-      if (para.length) {
-        paras.push(para);
-        para = [];
-      }
-    } else {
-      para.push(line);
-    }
-  }
-  if (para.length) paras.push(para);
-
-  return (
-    <div className="mt-2 space-y-1.5 text-[15px] leading-[1.7] text-ink">
-      {paras.map((p, i) => {
-        const first = p[0] ?? "";
-        const joined = p.join("\n");
-        if (/^(Sent from|从我的)/.test(first)) {
-          return (
-            <p key={i} className="text-[12.5px] text-sub">
-              <Linkify text={joined} />
-            </p>
-          );
-        }
-        const isGreeting = /^(亲爱的|尊敬的|Hi[,，]?|Hello[,，]?)/i.test(first);
-        return (
-          <p
-            key={i}
-            className="whitespace-pre-wrap"
-            style={{ textIndent: isGreeting ? 0 : "2em" }}
-          >
-            <Linkify text={joined} />
-          </p>
-        );
-      })}
-    </div>
-  );
-}
-
-function HistoryCard({ msg, oldest }: { msg: HistoryMsg; oldest: boolean }) {
-  const mine = msg.mine;
-  const initial = (msg.sender[0] || "?").toUpperCase();
-  const timeShort = msg.timeRaw.replace(/^\d{4}年/, "");
-  return (
-    <div
-      className={`rounded-md border border-line ${
-        mine
-          ? "border-l-4 border-l-accent bg-white"
-          : "border-l-4 border-l-[#D5DAE1] bg-[#FAFBFC]"
-      }`}
-    >
-      <div
-        className={`flex items-center gap-2 px-3 py-1.5 ${
-          mine ? "bg-accent/5" : "bg-[#F1F3F5]"
-        }`}
-      >
-        <span
-          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${
-            mine ? "bg-accent text-white" : "bg-[#D5DAE1] text-sub"
-          }`}
-        >
-          {initial}
-        </span>
-        <span className="truncate text-[13px] font-medium text-ink">{msg.sender}</span>
-        {timeShort && (
-          <span className="shrink-0 text-[11.5px] tabular-nums text-sub">{timeShort}</span>
-        )}
-        <span
-          className={`ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10.5px] font-medium ${
-            mine ? "bg-accent text-white" : "bg-[#E4E7EB] text-sub"
-          }`}
-        >
-          {mine ? "我方" : "客户"}
-        </span>
-      </div>
-      {msg.body.length ? (
-        <div className="px-3 pb-2">
-          <MessageBody body={msg.body} />
-        </div>
-      ) : (
-        <p className="px-3 pb-2 text-[12px] text-sub">
-          {oldest
-            ? "（最早一封邮件：发件方邮件客户端未包含其正文）"
-            : "（该邮件正文缺失）"}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function HistorySection({ msgs }: { msgs: HistoryMsg[] }) {
-  const sorted = [...msgs].sort((a, b) => a.ts - b.ts);
-  return (
-    <div className="space-y-2">
-      {sorted.map((msg, i) => (
-        <HistoryCard key={i} msg={msg} oldest={i === 0 && msg.ts > 0} />
-      ))}
-    </div>
-  );
-}
-
 function EmailBodyView({ text }: { text: string }) {
+  // Renders the email's fresh body as a letter. Quoted history (`>` blocks)
+  // is intentionally skipped here — the conversation timeline itself is the
+  // history, so the letter shows only the new part, keeping one fold in total.
   const chunks = chunkEmailText(normalizeSpacing(text));
-  // Quoted history (older emails the customer's mail client attached) is folded
-  // behind a bar, so the boss sees only the fresh part of the letter by default.
-  const [quoteOpen, setQuoteOpen] = useState(false);
-  const quoteLines = chunks.filter((c) => c.kind === "quote").flatMap((c) => c.lines);
-  const history = parseHistory(quoteLines);
 
   return (
     <div className="space-y-2.5 text-[16px] leading-[1.7] text-ink">
@@ -372,25 +193,6 @@ function EmailBodyView({ text }: { text: string }) {
               );
           }
         })}
-      {history.length > 0 &&
-        (quoteOpen ? (
-          <>
-            <HistorySection msgs={history} />
-            <button
-              onClick={() => setQuoteOpen(false)}
-              className="w-full rounded border border-dashed border-line bg-[#F1F3F5] px-3 py-1 text-[12px] text-sub transition-colors hover:text-accent"
-            >
-              <span className="text-accent">▾</span> 收起历史对话
-            </button>
-          </>
-        ) : (
-          <button
-            onClick={() => setQuoteOpen(true)}
-            className="w-full rounded border border-dashed border-line bg-[#F1F3F5] px-3 py-1.5 text-[12px] text-sub transition-colors hover:text-accent"
-          >
-            <span className="text-accent">▸</span> 历史对话（{history.length} 封消息）点击展开
-          </button>
-        ))}
     </div>
   );
 }
@@ -413,8 +215,18 @@ export function Timeline({
     {},
   );
   // Default view: only the latest customer email stays open, everything older
-  // folds behind a single "show more" bar; click to expand the full history.
+  // folds behind a single "历史对话" bar; click to expand the full history.
   const [folded, setFolded] = useState(true);
+
+  // The freshest customer email opens as a full letter by default, so the boss
+  // sees the newest request at a glance without an extra click. Older emails
+  // stay on their compact summary.
+  useEffect(() => {
+    let last: TimelineItem | undefined;
+    for (const it of items)
+      if (it.type === "email" && it.email_id != null) last = it;
+    if (last?.email_id != null) showFull(last);
+  }, []);
 
   async function showFull(item: TimelineItem) {
     const id = item.email_id!;
@@ -447,198 +259,209 @@ export function Timeline({
     onRefresh();
   }
 
-  // Fold layout: anchor on the latest inbound email (the freshest customer
-  // ask). Everything older collapses behind one bar; anything after the anchor
-  // (e.g. a sent reply) stays visible, and the draft editor sits after.
-  const total = items.length;
-  const lastEmailIdx = items.map((i) => i.type).lastIndexOf("email");
-  const openFrom = lastEmailIdx >= 0 ? lastEmailIdx : Math.max(0, total - 1);
-  const foldable = openFrom > 0;
-  const midStart = 0;
-  const midEnd = openFrom;
-  const midCount = foldable ? midEnd - midStart : 0;
-  const midFrom = foldable
-    ? formatLocal(items[midStart].at ?? null).slice(0, 5)
-    : "";
-  const midTo = foldable
-    ? formatLocal(items[midEnd - 1].at ?? null).slice(0, 5)
-    : "";
-  const midRange = midFrom && midTo ? `${midFrom} – ${midTo}` : "";
+  // Fold layout: keep the oldest message open at the top and the newest few
+  // open at the bottom; everything in between collapses behind one "show more"
+  // bar. The bottom window is sized by how much quoted history the freshest
+  // customer email carries (a long quoted thread needs more visible context).
+  // Only the freshest customer email stays open by default; everything older
+  // folds behind one "历史对话" bar. Anything after the last email (e.g. a
+  // pending-review reply) stays open too.
+  let lastEmailIdx = -1;
+  items.forEach((it, i) => {
+    if (it.type === "email") lastEmailIdx = i;
+  });
+  const openStart = lastEmailIdx < 0 ? 0 : lastEmailIdx;
+  const foldable = openStart > 0;
+  const historyCount = foldable ? openStart : 0;
 
-  return (
-    <ol className="space-y-3">
-      {items.map((item, idx) => {
-        // Folded older section: render one "show more" bar in place of the
-        // messages before the anchor email, skip the rest until expanded.
-        if (foldable && folded && idx >= midStart && idx < midEnd) {
-          if (idx === midStart) {
-            return (
-              <li key={`fold:${idx}`}>
-                <button
-                  onClick={() => setFolded(false)}
-                  className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-line bg-[#F1F3F5] px-4 py-2.5 text-[12.5px] text-sub transition-colors hover:bg-[#EAEDF0] hover:text-ink"
-                >
-                  <span className="font-medium text-accent">▸</span>
-                  <span>更早的 {midCount} 条消息</span>
-                  {midRange && <span>{midRange}</span>}
-                  <span className="font-medium text-accent">点击展开</span>
-                </button>
-              </li>
-            );
-          }
-          return null;
-        }
-        const tone = toneOf(item);
-        return (
-          <li key={idx}>
-            <div className={`rounded-lg px-4 py-3 ${CARD_STYLE[tone]}`}>
-              <div className="mb-2 flex flex-wrap items-center gap-2 text-[11.5px] text-sub">
-                <span
-                  className={`px-2.5 py-1 rounded text-[12.5px] font-medium ${BADGE_STYLE[tone]}`}
-                >
-                  {typeLabel(item)}
-                </span>
-                {item.status && (
-                  <span
-                    className={`px-1.5 py-0.5 rounded text-[11px] ${
-                      STATUS_STYLE[item.status] || "bg-[#EFF1F3] text-sub"
-                    }`}
-                  >
-                    {STATUS_LABEL[item.status] || item.status}
-                  </span>
-                )}
-                {item.reply_type && item.reply_type !== "general" && (
-                  <span className="text-accent">{item.reply_type}</span>
-                )}
-                <span className="ml-auto tabular-nums">
-                  {formatLocal(item.at ?? null)}
-                </span>
-              </div>
+  const renderItem = (item: TimelineItem, idx: number, history = false) => {
+    const tone = toneOf(item);
+    return (
+      <li key={idx}>
+        <div className={`rounded-lg px-4 py-3 ${CARD_STYLE[tone]}`}>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-[11.5px] text-sub">
+            <span
+              className={`px-2.5 py-1 rounded text-[12.5px] font-medium ${BADGE_STYLE[tone]}`}
+            >
+              {typeLabel(item)}
+            </span>
+            {item.status && (
+              <span
+                className={`px-1.5 py-0.5 rounded text-[11px] ${
+                  STATUS_STYLE[item.status] || "bg-[#EFF1F3] text-sub"
+                }`}
+              >
+                {STATUS_LABEL[item.status] || item.status}
+              </span>
+            )}
+            {item.reply_type && item.reply_type !== "general" && (
+              <span className="text-accent">{item.reply_type}</span>
+            )}
+            <span className="ml-auto tabular-nums">
+              {formatLocal(item.at ?? null)}
+            </span>
+          </div>
 
-              {item.type === "email" &&
-                (showCn ? (
-                  <div>
-                    <div className="mb-2 flex items-center gap-1 text-[12px]">
-                      <button
-                        onClick={() =>
-                          setFullMode((prev) => {
-                            const next = new Set(prev);
-                            next.delete(item.email_id!);
-                            return next;
-                          })
-                        }
-                        className={`px-2 py-0.5 rounded transition-colors ${
-                          fullMode.has(item.email_id!)
-                            ? "text-sub hover:text-ink"
-                            : "bg-accent text-white font-medium"
-                        }`}
-                      >
-                        概括
-                      </button>
-                      <button
-                        onClick={() => showFull(item)}
-                        className={`px-2 py-0.5 rounded transition-colors ${
-                          fullMode.has(item.email_id!)
-                            ? "bg-accent text-white font-medium"
-                            : "text-sub hover:text-ink"
-                        }`}
-                      >
-                        全文
-                      </button>
+          {/* Per-email 概括/全文 toggle sits under the message type label, so
+              each email card carries its own summary<->full-translation switch
+              and the header no longer needs a duplicated 全文 button. It only
+              makes sense in Chinese mode (English mode shows the raw letter). */}
+          {item.type === "email" &&
+            item.email_id != null &&
+            showCn &&
+            !history && (
+            <div className="mb-2 flex items-center gap-1.5">
+              <button
+                onClick={() =>
+                  setFullMode((prev) => {
+                    const next = new Set(prev);
+                    next.delete(item.email_id!);
+                    return next;
+                  })
+                }
+                className={`px-2.5 py-0.5 rounded text-[11.5px] transition-colors ${
+                  !fullMode.has(item.email_id)
+                    ? "bg-accent text-white font-medium"
+                    : "border border-line text-sub hover:bg-[#F7F9FB] hover:text-ink"
+                }`}
+              >
+                概括
+              </button>
+              <button
+                onClick={() => {
+                  if (!fullMode.has(item.email_id!)) showFull(item);
+                }}
+                className={`px-2.5 py-0.5 rounded text-[11.5px] transition-colors ${
+                  fullMode.has(item.email_id)
+                    ? "bg-accent text-white font-medium"
+                    : "border border-line text-sub hover:bg-[#F7F9FB] hover:text-ink"
+                }`}
+              >
+                全文
+              </button>
+            </div>
+          )}
+
+          {item.type === "email" &&
+            (showCn ? (
+              <div>
+                {fullMode.has(item.email_id!) ? (
+                  translatingId === item.email_id &&
+                  !fullCn[item.email_id!] &&
+                  !item.content_cn ? (
+                    <div className="text-[16px] leading-normal text-sub">
+                      全文翻译中…
                     </div>
-                    {fullMode.has(item.email_id!) ? (
-                      translatingId === item.email_id &&
-                      !fullCn[item.email_id!] &&
-                      !item.content_cn ? (
-                        <div className="text-[16px] leading-normal text-sub">
-                          全文翻译中…
-                        </div>
-                      ) : (
-                        <EmailBodyView
-                          text={
-                            fullCn[item.email_id!] ??
-                            item.content_cn ??
-                            item.content ??
-                            ""
-                          }
-                        />
-                      )
-                    ) : (
-                      <div className="text-[16px] leading-normal whitespace-pre-wrap text-ink">
-                        {item.summary_cn || normalizeSpacing(item.content)}
-                      </div>
-                    )}
-                    {translateErrors[item.email_id!] && (
-                      <p className="mt-1 text-[12px] text-risk-high">
-                        {translateErrors[item.email_id!]}
-                      </p>
-                    )}
-                  </div>
+                  ) : (
+                    <EmailBodyView
+                      text={
+                        fullCn[item.email_id!] ??
+                        item.content_cn ??
+                        item.content ??
+                        ""
+                      }
+                    />
+                  )
                 ) : (
-                  <div className="text-[16px] leading-[1.75] whitespace-pre-wrap text-ink">
-                    {normalizeSpacing(item.content)}
+                  <div className="text-[16px] leading-normal whitespace-pre-wrap text-ink">
+                    {item.summary_cn || normalizeSpacing(item.content)}
                   </div>
-                ))}
+                )}
+                {translateErrors[item.email_id!] && (
+                  <p className="mt-1 text-[12px] text-risk-high">
+                    {translateErrors[item.email_id!]}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="text-[16px] leading-[1.75] whitespace-pre-wrap text-ink">
+                {normalizeSpacing(item.content)}
+              </div>
+            ))}
 
-              {item.type === "reply" && (
-                <div>
-                  <div
-                    className={`text-[15px] whitespace-pre-wrap text-ink ${
-                      showCn && item.content_cn
-                        ? "leading-normal"
-                        : "leading-[1.75]"
-                    }`}
+          {item.type === "reply" && (
+            <div>
+              <div
+                className={`text-[15px] whitespace-pre-wrap text-ink ${
+                  showCn && item.content_cn
+                    ? "leading-normal"
+                    : "leading-[1.75]"
+                }`}
+              >
+                {showCn && item.content_cn
+                  ? item.content_cn
+                  : item.content_en}
+              </div>
+              {item.status === "pending_review" && item.reply_id && (
+                <div className="mt-3 flex gap-2">
+                  <button
+                    onClick={() => approve(item.reply_id!)}
+                    className="px-3 py-1.5 bg-accent text-white rounded text-[12px] font-medium hover:bg-accent/90"
                   >
-                    {showCn && item.content_cn
-                      ? item.content_cn
-                      : item.content_en}
-                  </div>
-                  {item.status === "pending_review" && item.reply_id && (
-                    <div className="mt-3 flex gap-2">
-                      <button
-                        onClick={() => approve(item.reply_id!)}
-                        className="px-3 py-1.5 bg-accent text-white rounded text-[12px] font-medium hover:bg-accent/90"
-                      >
-                        审核通过并发送
-                      </button>
-                      <button
-                        onClick={() => reject(item.reply_id!)}
-                        className="px-3 py-1.5 border border-line text-sub rounded text-[12px] hover:text-ink hover:bg-[#F7F9FB]"
-                      >
-                        驳回为草稿
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {item.type === "attachment" && (
-                <div className="flex flex-col gap-2">
-                  {item.content_type?.startsWith("image/") &&
-                    item.attachment_id && (
-                      <img
-                        src={`/api/v1/attachments/${item.attachment_id}`}
-                        alt={item.filename}
-                        className="max-h-64 rounded border border-line"
-                      />
-                    )}
-                  <a
-                    href={`/api/v1/attachments/${item.attachment_id}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[13.5px] text-accent underline"
+                    审核通过并发送
+                  </button>
+                  <button
+                    onClick={() => reject(item.reply_id!)}
+                    className="px-3 py-1.5 border border-line text-sub rounded text-[12px] hover:text-ink hover:bg-[#F7F9FB]"
                   >
-                    📎 {item.filename}
-                    {typeof item.size_bytes === "number"
-                      ? `（${(item.size_bytes / 1024).toFixed(0)} KB）`
-                      : ""}
-                  </a>
+                    驳回为草稿
+                  </button>
                 </div>
               )}
             </div>
-          </li>
-        );
-      })}
+          )}
+
+          {item.type === "attachment" && (
+            <div className="flex flex-col gap-2">
+              {item.content_type?.startsWith("image/") &&
+                item.attachment_id && (
+                  <img
+                    src={`/api/v1/attachments/${item.attachment_id}`}
+                    alt={item.filename}
+                    className="max-h-64 rounded border border-line"
+                  />
+                )}
+              <a
+                href={`/api/v1/attachments/${item.attachment_id}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-[13.5px] text-accent underline"
+              >
+                📎 {item.filename}
+                {typeof item.size_bytes === "number"
+                  ? `（${(item.size_bytes / 1024).toFixed(0)} KB）`
+                  : ""}
+              </a>
+            </div>
+          )}
+        </div>
+      </li>
+    );
+  };
+
+  return (
+    <ol className="space-y-3">
+      {/* Newest window: the freshest email (and anything after it) stays open. */}
+      {items.slice(openStart).map((item, i) =>
+        renderItem(item, openStart + i, false),
+      )}
+      {/* Fold bar sits right under the newest letter. */}
+      {foldable && (
+        <li key="fold">
+          <button
+            onClick={() => setFolded(!folded)}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-line bg-[#F1F3F5] px-4 py-2.5 text-[12.5px] text-sub transition-colors hover:bg-[#EAEDF0] hover:text-ink"
+          >
+            <span className="font-medium text-accent">{folded ? "▸" : "▾"}</span>
+            <span>历史对话（更早的 {historyCount} 条）</span>
+            {folded && <span className="font-medium text-accent">点击展开</span>}
+          </button>
+        </li>
+      )}
+      {/* History window, only when expanded. Older cards keep a compact look
+          (no 概括/全文 toggle) so the expanded thread reads like a letter. */}
+      {!folded &&
+        items.slice(0, openStart).map((item, i) => renderItem(item, i, true))}
     </ol>
   );
 }
