@@ -90,8 +90,29 @@ function quoteDepth(line: string): number {
   return d;
 }
 
+// Embedded HTML tags (<b>/<i>…), invisible markers mailers inject (U+035F
+// combining grapheme joiner, zero-width spaces) and base64/CSS debris (very
+// long tokens with no spaces) make full-text look broken. Sanitize at the
+// chunking entry so the English original, Chinese translation, fresh body and
+// quoted history all get cleaned; real paragraphs and URLs are preserved.
+function sanitizeText(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => {
+      let s = line.replace(/<[^>]*>/g, "");
+      s = s.replace(/[\u034f\u00ad\u200b\u200c\u200d\u2060\ufeff]/g, "");
+      const t = s.trim();
+      if (!t) return "";
+      // base64 / inline-CSS debris: very long, no spaces, not a URL.
+      if (t.length > 200 && !/\s/.test(t) && !/^[a-z]+:\/\//i.test(t)) return "";
+      return s;
+    })
+    .join("\n");
+}
+
 function chunkEmailText(text: string): BodyChunk[] {
-  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const lines = sanitizeText(text).split("\n");
   const chunks: BodyChunk[] = [];
   let inQuoted = false;
 
