@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { dataOf, errorText, http } from "../api/client";
 import { formatLocal } from "../utils/format";
 
@@ -89,6 +89,312 @@ function normalizeSpacing(text?: string | null): string {
     .replace(/\n{3,}/g, "\n\n");
 }
 
+// The full-text translation is a plain wall of Chinese text, but the email it
+// came from is a real letter: greeting, paragraphs, quoted history and an
+// email-client signature. Break it into those semantic blocks so it reads like
+// a letter instead of one dense paragraph.
+type BodyChunk =
+  | { kind: "para" | "quote" | "list" | "sig"; lines: string[] };
+
+function appendLine(chunks: BodyChunk[], kind: BodyChunk["kind"], line: string) {
+  const last = chunks[chunks.length - 1];
+  if (last?.kind === kind) last.lines.push(line);
+  else chunks.push({ kind, lines: [line] });
+}
+
+function chunkEmailText(text: string): BodyChunk[] {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const chunks: BodyChunk[] = [];
+
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    const last = chunks[chunks.length - 1];
+
+    if (/^>+/.test(trimmed)) {
+      appendLine(chunks, "quote", trimmed);
+    } else if (/^[-*•]\s+/.test(trimmed)) {
+      appendLine(chunks, "list", trimmed.replace(/^[-*•]\s+/, ""));
+    } else if (!trimmed) {
+      // Blank line closes the current paragraph (a marker block is filtered out).
+      if (last?.kind === "para") chunks.push({ kind: "para", lines: [] });
+    } else if (
+      /^(Sent from|从我的)/.test(trimmed) &&
+      chunks.some((c) => c.kind === "para")
+    ) {
+      appendLine(chunks, "sig", trimmed);
+    } else {
+      appendLine(chunks, "para", trimmed);
+    }
+  }
+
+  return chunks.filter((c) => c.lines.some((l) => l.trim()));
+}
+
+// --- 历史对话：把引用的旧邮件切成一条条消息 --------------------------
+// 翻译后的历史是"时间，发件人 写道：\n<正文>" 的嵌套文本，且 `>` 层级在
+// 翻译里并不一致。所以按 header 切消息、按时间重排（旧→新），再用
+// 我方/客户配色区分收发，正文按书信排版。
+
+interface HistoryMsg {
+  sender: string;
+  email: string | null;
+  timeRaw: string;
+  ts: number;
+  mine: boolean;
+  body: string[];
+}
+
+const HEADER_RE = /^(.*?)，(.*?)\s*(?:写道|wrote)[：:]?$/;
+const DATE_RE = /^\d{4}年\d{1,2}月\d{1,2}日/;
+const TIME_RE =
+  /(\d{4})年(\d{1,2})月(\d{1,2})日(凌晨|早上|上午|中午|下午|晚上)?(\d{1,2})[:：](\d{1,2})/;
+
+// 翻译出的中文时间（"2026年8月17日晚上7:17"）转成可排序的时间戳。
+function parseTime(s: string): number {
+  const m = s.match(TIME_RE);
+  if (!m) return 0;
+  const [, , , , period, h, min] = m;
+  const y = +m[1];
+  const mo = +m[2];
+  const d = +m[3];
+  let hour = +h;
+  if (period === "凌晨" && hour === 12) hour = 0;
+  else if ((period === "中午" || period === "下午" || period === "晚上") && hour < 12)
+    hour += 12;
+  return Date.UTC(y, mo - 1, d, hour, +min);
+}
+
+// 把带 `>` 前缀的历史行切成"发件人 + 正文"的消息序列。
+function parseHistory(lines: string[]): HistoryMsg[] {
+  const msgs: HistoryMsg[] = [];
+  let cur: HistoryMsg | null = null;
+  for (const raw of lines) {
+    const line = raw.replace(/^>+\s*/, "").trim();
+    if (!line) {
+      if (cur) cur.body.push("");
+      continue;
+    }
+    const hm = line.match(HEADER_RE);
+    if (hm && DATE_RE.test(hm[1])) {
+      if (cur) msgs.push(cur);
+      const [, timeRaw, senderRaw] = hm;
+      const em = senderRaw.match(/<([^>]+)>/);
+      const email = em ? em[1] : senderRaw;
+      const sender = em ? senderRaw.replace(/\s*<[^>]+>/, "").trim() : senderRaw;
+      cur = {
+        sender: sender || email,
+        email,
+        timeRaw,
+        ts: parseTime(timeRaw),
+        mine: /shoplbora/i.test(email || "") || /shoplbora/i.test(sender),
+        body: [],
+      };
+    } else if (cur) {
+      cur.body.push(line);
+    } else {
+      // 首个 header 之前的零散行（异常情况）：并成一条"未知"消息，避免丢正文
+      if (!cur)
+        cur = { sender: "未知发件人", email: null, timeRaw: "", ts: 0, mine: false, body: [] };
+      cur.body.push(line);
+    }
+  }
+  if (cur) msgs.push(cur);
+  return msgs;
+}
+
+// 正文里的 http(s) 链接还原成可点击的蓝色链接（纯文本翻译保留了 URL）。
+function Linkify({ text }: { text: string }) {
+  const nodes: ReactNode[] = [];
+  const re = /(https?:\/\/[^\s　<>"'，。；：（）【】]+)/g;
+  let last = 0;
+  let key = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    const url = m[1].replace(/[.,;:!?。，；：！？]+$/, "");
+    nodes.push(
+      <a
+        key={key++}
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="break-all text-accent underline decoration-accent/40 hover:text-accent/80"
+      >
+        {url}
+      </a>,
+    );
+    last = re.lastIndex;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return <>{nodes}</>;
+}
+
+// 单条消息的正文：按空行切段落，首行缩进两字符（书信格式），签名识别为小字。
+function MessageBody({ body }: { body: string[] }) {
+  const paras: string[][] = [];
+  let para: string[] = [];
+  for (const line of body) {
+    if (!line.trim()) {
+      if (para.length) {
+        paras.push(para);
+        para = [];
+      }
+    } else {
+      para.push(line);
+    }
+  }
+  if (para.length) paras.push(para);
+
+  return (
+    <div className="mt-2 space-y-1.5 text-[15px] leading-[1.7] text-ink">
+      {paras.map((p, i) => {
+        const first = p[0] ?? "";
+        const joined = p.join("\n");
+        if (/^(Sent from|从我的)/.test(first)) {
+          return (
+            <p key={i} className="text-[12.5px] text-sub">
+              <Linkify text={joined} />
+            </p>
+          );
+        }
+        const isGreeting = /^(亲爱的|尊敬的|Hi[,，]?|Hello[,，]?)/i.test(first);
+        return (
+          <p
+            key={i}
+            className="whitespace-pre-wrap"
+            style={{ textIndent: isGreeting ? 0 : "2em" }}
+          >
+            <Linkify text={joined} />
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+function HistoryCard({ msg, oldest }: { msg: HistoryMsg; oldest: boolean }) {
+  const mine = msg.mine;
+  const initial = (msg.sender[0] || "?").toUpperCase();
+  const timeShort = msg.timeRaw.replace(/^\d{4}年/, "");
+  return (
+    <div
+      className={`rounded-md border border-line ${
+        mine
+          ? "border-l-4 border-l-accent bg-white"
+          : "border-l-4 border-l-[#D5DAE1] bg-[#FAFBFC]"
+      }`}
+    >
+      <div
+        className={`flex items-center gap-2 px-3 py-1.5 ${
+          mine ? "bg-accent/5" : "bg-[#F1F3F5]"
+        }`}
+      >
+        <span
+          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${
+            mine ? "bg-accent text-white" : "bg-[#D5DAE1] text-sub"
+          }`}
+        >
+          {initial}
+        </span>
+        <span className="truncate text-[13px] font-medium text-ink">{msg.sender}</span>
+        {timeShort && (
+          <span className="shrink-0 text-[11.5px] tabular-nums text-sub">{timeShort}</span>
+        )}
+        <span
+          className={`ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10.5px] font-medium ${
+            mine ? "bg-accent text-white" : "bg-[#E4E7EB] text-sub"
+          }`}
+        >
+          {mine ? "我方" : "客户"}
+        </span>
+      </div>
+      {msg.body.length ? (
+        <div className="px-3 pb-2">
+          <MessageBody body={msg.body} />
+        </div>
+      ) : (
+        <p className="px-3 pb-2 text-[12px] text-sub">
+          {oldest
+            ? "（最早一封邮件：发件方邮件客户端未包含其正文）"
+            : "（该邮件正文缺失）"}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function HistorySection({ msgs }: { msgs: HistoryMsg[] }) {
+  const sorted = [...msgs].sort((a, b) => a.ts - b.ts);
+  return (
+    <div className="space-y-2">
+      {sorted.map((msg, i) => (
+        <HistoryCard key={i} msg={msg} oldest={i === 0 && msg.ts > 0} />
+      ))}
+    </div>
+  );
+}
+
+function EmailBodyView({ text }: { text: string }) {
+  const chunks = chunkEmailText(normalizeSpacing(text));
+  // Quoted history (older emails the customer's mail client attached) is folded
+  // behind a bar, so the boss sees only the fresh part of the letter by default.
+  const [quoteOpen, setQuoteOpen] = useState(false);
+  const quoteLines = chunks.filter((c) => c.kind === "quote").flatMap((c) => c.lines);
+  const history = parseHistory(quoteLines);
+
+  return (
+    <div className="space-y-2.5 text-[16px] leading-[1.7] text-ink">
+      {chunks
+        .filter((c) => c.kind !== "quote")
+        .map((chunk, i) => {
+          switch (chunk.kind) {
+            case "para":
+              return (
+                <p key={i} className="whitespace-pre-wrap">
+                  <Linkify text={chunk.lines.join("\n")} />
+                </p>
+              );
+            case "list":
+              return (
+                <ul key={i} className="list-disc space-y-0.5 pl-6">
+                  {chunk.lines.map((line, j) => (
+                    <li key={j}>
+                      <Linkify text={line} />
+                    </li>
+                  ))}
+                </ul>
+              );
+            case "sig":
+              return (
+                <p key={i} className="text-[12.5px] text-sub">
+                  <Linkify text={chunk.lines.join("\n")} />
+                </p>
+              );
+          }
+        })}
+      {history.length > 0 &&
+        (quoteOpen ? (
+          <>
+            <HistorySection msgs={history} />
+            <button
+              onClick={() => setQuoteOpen(false)}
+              className="w-full rounded border border-dashed border-line bg-[#F1F3F5] px-3 py-1 text-[12px] text-sub transition-colors hover:text-accent"
+            >
+              <span className="text-accent">▾</span> 收起历史对话
+            </button>
+          </>
+        ) : (
+          <button
+            onClick={() => setQuoteOpen(true)}
+            className="w-full rounded border border-dashed border-line bg-[#F1F3F5] px-3 py-1.5 text-[12px] text-sub transition-colors hover:text-accent"
+          >
+            <span className="text-accent">▸</span> 历史对话（{history.length} 封消息）点击展开
+          </button>
+        ))}
+    </div>
+  );
+}
+
 export function Timeline({
   items,
   showCn,
@@ -106,8 +412,8 @@ export function Timeline({
   const [translateErrors, setTranslateErrors] = useState<Record<number, string>>(
     {},
   );
-  // Long threads: keep the two oldest and three newest messages open, fold the
-  // rest behind a "show more" bar so a 10+ message thread stays scannable.
+  // Default view: only the latest customer email stays open, everything older
+  // folds behind a single "show more" bar; click to expand the full history.
   const [folded, setFolded] = useState(true);
 
   async function showFull(item: TimelineItem) {
@@ -141,14 +447,15 @@ export function Timeline({
     onRefresh();
   }
 
-  // Fold layout: oldest TOP_VISIBLE messages stay open, middle ones collapse
-  // behind a bar, newest BOTTOM_VISIBLE stay open (draft editor sits after).
-  const TOP_VISIBLE = 2;
-  const BOTTOM_VISIBLE = 3;
+  // Fold layout: anchor on the latest inbound email (the freshest customer
+  // ask). Everything older collapses behind one bar; anything after the anchor
+  // (e.g. a sent reply) stays visible, and the draft editor sits after.
   const total = items.length;
-  const foldable = total > TOP_VISIBLE + BOTTOM_VISIBLE;
-  const midStart = TOP_VISIBLE;
-  const midEnd = total - BOTTOM_VISIBLE;
+  const lastEmailIdx = items.map((i) => i.type).lastIndexOf("email");
+  const openFrom = lastEmailIdx >= 0 ? lastEmailIdx : Math.max(0, total - 1);
+  const foldable = openFrom > 0;
+  const midStart = 0;
+  const midEnd = openFrom;
   const midCount = foldable ? midEnd - midStart : 0;
   const midFrom = foldable
     ? formatLocal(items[midStart].at ?? null).slice(0, 5)
@@ -161,8 +468,8 @@ export function Timeline({
   return (
     <ol className="space-y-3">
       {items.map((item, idx) => {
-        // Folded middle section: render one "show more" bar in place of the
-        // middle messages, skip the rest until expanded.
+        // Folded older section: render one "show more" bar in place of the
+        // messages before the anchor email, skip the rest until expanded.
         if (foldable && folded && idx >= midStart && idx < midEnd) {
           if (idx === midStart) {
             return (
@@ -172,7 +479,7 @@ export function Timeline({
                   className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-line bg-[#F1F3F5] px-4 py-2.5 text-[12.5px] text-sub transition-colors hover:bg-[#EAEDF0] hover:text-ink"
                 >
                   <span className="font-medium text-accent">▸</span>
-                  <span>还有 {midCount} 条中间消息</span>
+                  <span>更早的 {midCount} 条消息</span>
                   {midRange && <span>{midRange}</span>}
                   <span className="font-medium text-accent">点击展开</span>
                 </button>
@@ -247,11 +554,14 @@ export function Timeline({
                           全文翻译中…
                         </div>
                       ) : (
-                        <div className="text-[16px] leading-normal whitespace-pre-wrap text-ink">
-                          {normalizeSpacing(
-                            fullCn[item.email_id!] ?? item.content_cn ?? item.content,
-                          )}
-                        </div>
+                        <EmailBodyView
+                          text={
+                            fullCn[item.email_id!] ??
+                            item.content_cn ??
+                            item.content ??
+                            ""
+                          }
+                        />
                       )
                     ) : (
                       <div className="text-[16px] leading-normal whitespace-pre-wrap text-ink">
