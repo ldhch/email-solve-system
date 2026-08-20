@@ -84,6 +84,9 @@ export default function Inbox() {
   const [convLoading, setConvLoading] = useState(false);
   const [convError, setConvError] = useState("");
   const [showCn, setShowCn] = useState(loadShowCn);
+  // Conversation-level 概括/全文 toggle: summary shows only the latest
+  // customer email's digest; full shows its complete letter on a gray board.
+  const [convMode, setConvMode] = useState<"summary" | "full">("summary");
 
   const load = useCallback(
     async (mode: "replace" | "append" = "replace") => {
@@ -429,6 +432,21 @@ export default function Inbox() {
                         {selectedItem.unread_count} 封未读
                       </span>
                     )}
+                    <div className="flex items-center bg-white border border-line rounded-md p-0.5">
+                      {(["summary", "full"] as const).map((m) => (
+                        <button
+                          key={m}
+                          onClick={() => setConvMode(m)}
+                          className={`px-2.5 py-1 rounded text-[12px] leading-none transition-colors ${
+                            convMode === m
+                              ? "bg-accent text-white font-medium"
+                              : "text-sub hover:text-ink"
+                          }`}
+                        >
+                          {m === "summary" ? "概括" : "全文"}
+                        </button>
+                      ))}
+                    </div>
                     <button
                       onClick={() =>
                         setShowCn((v) => {
@@ -448,7 +466,8 @@ export default function Inbox() {
                 <Timeline
                   items={conv.timeline}
                   showCn={showCn}
-                  onRefresh={refresh}
+                  mode={convMode}
+                  customerEmail={conv.customer.email}
                 />
                 <ReplyDraftEditor items={conv.timeline} onChanged={refresh} />
                 <div className="mt-4">

@@ -33,6 +33,9 @@ export default function ConversationDetail() {
   const conversationId = Number(id);
   const [data, setData] = useState<ConversationData | null>(null);
   const [showCn, setShowCn] = useState(loadShowCn);
+  // Conversation-level 概括/全文 toggle: summary shows only the latest
+  // customer email's digest; full shows its complete letter on a gray board.
+  const [convMode, setConvMode] = useState<"summary" | "full">("summary");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [splitOpen, setSplitOpen] = useState(false);
@@ -137,6 +140,21 @@ export default function ConversationDetail() {
               请在 {formatLocal(data.sla_deadline)} 前回复
             </span>
           )}
+          <div className="ml-auto flex items-center bg-white border border-gray-300 rounded-md p-0.5">
+            {(["summary", "full"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setConvMode(m)}
+                className={`px-3 py-1 rounded text-sm leading-none transition-colors ${
+                  convMode === m
+                    ? "bg-accent text-white font-medium"
+                    : "text-gray-500 hover:text-gray-800"
+                }`}
+              >
+                {m === "summary" ? "概括" : "全文"}
+              </button>
+            ))}
+          </div>
           <button
             onClick={() =>
               setShowCn((v) => {
@@ -144,7 +162,7 @@ export default function ConversationDetail() {
                 return !v;
               })
             }
-            className="ml-auto px-3 py-1 border border-gray-300 rounded text-sm"
+            className="px-3 py-1 border border-gray-300 rounded text-sm"
           >
             {showCn ? "显示英文" : "显示中文"}
           </button>
@@ -274,7 +292,12 @@ export default function ConversationDetail() {
 
       <PendingReviewCard items={data.timeline} onRefresh={load} />
 
-      <Timeline items={data.timeline} showCn={showCn} onRefresh={load} />
+      <Timeline
+        items={data.timeline}
+        showCn={showCn}
+        mode={convMode}
+        customerEmail={data.customer.email}
+      />
 
       <ReplyDraftEditor items={data.timeline} onChanged={load} />
 
