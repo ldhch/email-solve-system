@@ -599,6 +599,33 @@ function HistoryBlock({
   );
 }
 
+// A sent reply from our side (manual or AI): blue-tinted card with a
+// 「√ 已发送」status badge and its origin (人工 / 自动), so the boss can verify
+// what was actually sent without opening the mailbox. Drafts / pending-review
+// replies are handled by PendingReviewCard and ReplyDraftEditor, not here.
+function ReplyBlock({ item, showCn }: { item: TimelineItem; showCn: boolean }) {
+  const text = showCn
+    ? item.content_cn || item.content_en || ""
+    : item.content_en || "";
+  const isManual = item.source === "manual";
+  return (
+    <div className={`rounded-lg px-4 py-3 ${CARD_STYLE.system}`}>
+      <MessageHeader label="我方回复" tone="system" at={formatLocal(item.at ?? null)} />
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-[11.5px] text-sub">
+        <span className="inline-flex items-center rounded bg-green-100 px-1.5 py-0.5 font-medium text-green-700">
+          √ 已发送
+        </span>
+        <span>{isManual ? "人工回复" : "自动回复"}</span>
+      </div>
+      {text && (
+        <div className="text-[15px] leading-[1.45] whitespace-pre-wrap text-ink">
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Timeline({
   items,
   showCn,
@@ -722,6 +749,15 @@ export function Timeline({
   // Attachments may belong to any email in the thread; show them all under the
   // freshest customer email so the boss sees the photos without digging.
   const attachments = items.filter((it) => it.type === "attachment");
+  // Latest sent reply, shown as a「我方已回复」digest in summary mode so the boss
+  // confirms what was sent without opening the full thread.
+  const sentReplies = items
+    .filter(
+      (it): it is TimelineItem & { reply_id: number } =>
+        it.type === "reply" && it.status === "sent" && it.reply_id != null,
+    )
+    .sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
+  const latestSent = sentReplies[sentReplies.length - 1] ?? null;
 
   if (mode === "summary") {
     return (
@@ -740,6 +776,24 @@ export function Timeline({
             <AttachmentGrid items={attachments} />
           </div>
         </li>
+        {latestSent && (
+          <li>
+            <div className={`rounded-lg px-4 py-3 ${CARD_STYLE.system}`}>
+              <MessageHeader
+                label="我方已回复"
+                tone="system"
+                at={formatLocal(latestSent.at ?? null)}
+              />
+              <p className="text-[15px] leading-normal whitespace-pre-wrap text-ink line-clamp-3">
+                {(latestSent.content_cn ||
+                  latestSent.content_en ||
+                  "（已发送回复）")
+                  .replace(/\s+/g, " ")
+                  .trim()}
+              </p>
+            </div>
+          </li>
+        )}
       </ol>
     );
   }
@@ -751,6 +805,17 @@ export function Timeline({
     .filter((c): c is Extract<BodyChunk, { kind: "quote" }> => c.kind === "quote")
     .flatMap((c) => c.lines);
   const rounds = parseQuotedRounds(quoteLines);
+
+  // The whole conversation as an interleaved message thread: every customer
+  // email and our sent replies, ordered by time. Drafts / pending-review
+  // replies stay with PendingReviewCard and ReplyDraftEditor.
+  const threadItems = items
+    .filter(
+      (it) =>
+        it.type === "email" ||
+        (it.type === "reply" && it.status === "sent"),
+    )
+    .sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
 
   return (
     <ol className="space-y-3">
@@ -774,34 +839,44 @@ export function Timeline({
         rounds.map((r, i) => (
           <HistoryBlock key={i} msg={r} customerEmail={customerEmail} />
         ))}
-      {/* Freshest customer email, always open, right above the reply box. */}
-      <li key="latest">
-        <div className={`rounded-lg px-4 py-3 ${CARD_STYLE.email}`}>
-          <MessageHeader
-            label="客户来信"
-            tone="email"
-            email={customerEmail}
-            at={latestAt}
-          />
-          {showCn ? (
-            // While the translation is in flight, fall back to the English
-            // original (fullText resolves to latest.content when uncached) so
-            // the boss can read immediately instead of staring at a spinner.
-            <EmailBodyView text={fullText} />
-          ) : (
-            <EmailBodyView text={latest.content ?? ""} />
-          )}
-          <AttachmentGrid items={attachments} />
-          {translating && !fullCn[id] && !latest.content_cn && (
-            <p className="mt-1.5 text-[12px] text-sub">
-              中文翻译生成中，先显示英文原文…
-            </p>
-          )}
-          {translateError && (
-            <p className="mt-1 text-[12px] text-risk-high">{translateError}</p>
-          )}
-        </div>
-      </li>
+      {threadItems.map((item) => {
+        if (item.type === "email") {
+          const isLatest = item.email_id === latest?.email_id;
+          return (
+            <li key={`e-${item.email_id}`}>
+              <div className={`rounded-lg px-4 py-3 ${CARD_STYLE.email}`}>
+                <MessageHeader
+                  label="客户来信"
+                  tone="email"
+                  email={customerEmail}
+                  at={formatLocal(item.at ?? null)}
+                />
+                {showCn ? (
+                  // Older emails fall back to their cached translation; only
+                  // the latest one triggers the on-demand translate above.
+                  <EmailBodyView text={item.content_cn || item.content || ""} />
+                ) : (
+                  <EmailBodyView text={item.content ?? ""} />
+                )}
+                {isLatest && <AttachmentGrid items={attachments} />}
+                {isLatest && translating && !fullCn[id] && !latest.content_cn && (
+                  <p className="mt-1.5 text-[12px] text-sub">
+                    中文翻译生成中，先显示英文原文…
+                  </p>
+                )}
+                {isLatest && translateError && (
+                  <p className="mt-1 text-[12px] text-risk-high">{translateError}</p>
+                )}
+              </div>
+            </li>
+          );
+        }
+        return (
+          <li key={`r-${item.reply_id}`}>
+            <ReplyBlock item={item} showCn={showCn} />
+          </li>
+        );
+      })}
     </ol>
   );
 }

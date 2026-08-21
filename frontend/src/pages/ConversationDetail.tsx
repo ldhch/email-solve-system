@@ -123,6 +123,17 @@ export default function ConversationDetail() {
   const splitCandidates = emailItems.filter((t) => t.email_id !== minEmailId);
   const suggestedMergeId = data.suggested_merge_conversation_id;
 
+  // Reply-box status: the last message decides whether the ball is in the
+  // customer's court (we sent the last reply) or ours (latest is an email).
+  const latestMsg = (data.timeline ?? [])
+    .filter(
+      (t) =>
+        t.type === "email" || (t.type === "reply" && t.status === "sent"),
+    )
+    .sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""))
+    .pop();
+  const waitingForCustomer = latestMsg?.type === "reply";
+
   return (
     <Layout>
       <div className="mb-4">
@@ -302,6 +313,21 @@ export default function ConversationDetail() {
       <ReplyDraftEditor items={data.timeline} onChanged={load} />
 
       <div className="mt-4">
+        {latestMsg && (
+          <div
+            className={`mb-2 flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[12.5px] ${
+              waitingForCustomer
+                ? "border-line bg-[#F7F9FB] text-sub"
+                : "border-accent/20 bg-accent-tint text-accent"
+            }`}
+          >
+            {waitingForCustomer ? (
+              <>√ 已发送 · 等待客户回复，有新来信后继续</>
+            ) : (
+              <>待回复 · 客户最新来信尚未处理</>
+            )}
+          </div>
+        )}
         <ReplyEditor conversationId={data.id} onSent={load} />
       </div>
     </Layout>

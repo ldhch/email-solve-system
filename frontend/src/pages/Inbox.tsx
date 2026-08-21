@@ -132,6 +132,17 @@ export default function Inbox() {
   // customer email's digest; full shows its complete letter on a gray board.
   const [convMode, setConvMode] = useState<"summary" | "full">("summary");
 
+  // Reply-box status: whether the ball is in the customer's court (the last
+  // message is our sent reply) or ours (the last is a customer email).
+  const latestMsg = (conv?.timeline ?? [])
+    .filter(
+      (t) =>
+        t.type === "email" || (t.type === "reply" && t.status === "sent"),
+    )
+    .sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""))
+    .pop();
+  const waitingForCustomer = latestMsg?.type === "reply";
+
   const load = useCallback(
     async (mode: "replace" | "append" = "replace") => {
       const seq = ++requestSeq.current;
@@ -726,6 +737,21 @@ export default function Inbox() {
                 />
                 <ReplyDraftEditor items={conv.timeline} onChanged={refresh} />
                 <div className="mt-4">
+                  {latestMsg && (
+                    <div
+                      className={`mb-2 flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[12.5px] ${
+                        waitingForCustomer
+                          ? "border-line bg-[#F7F9FB] text-sub"
+                          : "border-accent/20 bg-accent-tint text-accent"
+                      }`}
+                    >
+                      {waitingForCustomer ? (
+                        <>√ 已发送 · 等待客户回复，有新来信后继续</>
+                      ) : (
+                        <>待回复 · 客户最新来信尚未处理</>
+                      )}
+                    </div>
+                  )}
                   <ReplyEditor conversationId={conv.id} onSent={refresh} />
                 </div>
               </div>
