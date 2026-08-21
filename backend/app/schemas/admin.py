@@ -66,3 +66,8 @@ class ReplyTemplateUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     content: str | None = Field(default=None, min_length=1, max_length=2000)
     sort_order: int | None = None
+
+
+class BlockedSenderCreateRequest(BaseModel):
+    value: str = Field(min_length=1, max_length=320)
+    scope: str = Field(pattern="^(email|domain)$")

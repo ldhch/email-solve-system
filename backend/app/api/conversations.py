@@ -144,6 +144,7 @@ async def conversation_detail(
                 "status": r.status,
                 "reply_type": r.reply_type,
                 "source": r.source,
+                "low_confidence": r.low_confidence,
                 "at": _fmt(r.sent_at or r.created_at),
             }
         )
@@ -197,6 +198,7 @@ async def conversation_detail(
             },
             "status": _conversation_status(conv),
             "risk_level": conv.risk_level,
+            "is_ad": any(e.is_ad for e in emails if e is not None),
             "retention_attempts": conv.retention_attempts,
             "suggested_merge_conversation_id": suggested_merge_conversation_id,
             "sla_deadline": _fmt(sla_deadline),
@@ -260,7 +262,10 @@ async def manual_reply(
     reply.source = "manual"
     try:
         _make_mailer(db, settings).send(
-            reply, to_email=latest.from_email, subject=latest.subject
+            reply,
+            to_email=latest.from_email,
+            subject=latest.subject,
+            bypass_rate_limit=True,
         )
     except SMTPError as exc:
         reply.status = "failed"
@@ -344,7 +349,10 @@ async def approve_reply(
 
     try:
         _make_mailer(db, settings).send(
-            reply, to_email=email.from_email, subject=email.subject
+            reply,
+            to_email=email.from_email,
+            subject=email.subject,
+            bypass_rate_limit=True,
         )
     except SMTPError as exc:
         reply.status = "failed"
@@ -491,7 +499,10 @@ async def send_draft(
     reply.source = "manual"
     try:
         _make_mailer(db, settings).send(
-            reply, to_email=email.from_email, subject=email.subject
+            reply,
+            to_email=email.from_email,
+            subject=email.subject,
+            bypass_rate_limit=True,
         )
     except SMTPError as exc:
         reply.status = "failed"

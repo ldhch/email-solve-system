@@ -27,6 +27,10 @@ class Reply(Base):
     # "system" for AI-generated pipeline replies; "manual" for owner-authored
     # manual replies or drafts edited by the owner before sending.
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="system")
+    # True for drafts the model generated despite low confidence (unclassifiable
+    # email). The UI shows an explicit "低置信度" warning — these are drafts to
+    # be checked by the boss, never auto-sent.
+    low_confidence: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     review_user_id: Mapped[int | None] = mapped_column(Integer)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

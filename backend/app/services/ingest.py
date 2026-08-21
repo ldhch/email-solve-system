@@ -40,6 +40,7 @@ from app.models.system_state import SystemState
 from app.models.ticket import Ticket
 from app.services.audit import log_action, utcnow
 from app.services.alerting import record_imap_failure, record_imap_success
+from app.services.blocked_senders import sender_is_blocked
 from app.services.classifier import (
     Classification,
     ClassifierService,
@@ -479,11 +480,22 @@ class IngestService:
         self.db.flush()
         self._persist_attachments(email_row, parsed.attachments)
 
+        # Blocked senders (blacklist) are archived to the「广告」tab without any
+        # LLM call — no classification, no reply, no retention, no ticket.
+        if sender_is_blocked(self.db, parsed.from_email):
+            return self._handle_ad(parsed, email_row, conversation, blocked=True)
+
         classification: Classification = self.classifier.classify(parsed)
         email_row.risk_level = classification.risk_level
         email_row.confidence = classification.confidence
         email_row.category = classification.category
         email_row.summary_cn = classification.summary_cn
+
+        # Marketing/newsletter mail detected by the classifier: same archiving
+        # path as a blacklist hit, but the classification is persisted first.
+        if classification.is_ad:
+            return self._handle_ad(parsed, email_row, conversation, blocked=False)
+
         self.conversations.update_risk(conversation, classification.risk_level)
         log_action(
             self.db,
@@ -583,6 +595,10 @@ class IngestService:
         if classification.risk_level == "high":
             return self._handle_high_risk(parsed, email_row, conversation, classification)
         if classification.risk_level == "unknown":
+            # Readable body -> low-confidence draft the boss can edit and send
+            # instead of writing from scratch; empty/unreadable -> pure manual.
+            if (parsed.body_text or "").strip():
+                return self._unknown_draft(parsed, email_row, conversation, classification)
             return self._manual(parsed, email_row, conversation, classification)
 
         if classification.category == "refund_request":
@@ -692,6 +708,73 @@ class IngestService:
             conversation_id=conversation.id,
             risk_level=classification.risk_level,
             category=classification.category,
+        )
+
+    def _unknown_draft(
+        self, parsed, email_row, conversation, classification
+    ) -> ProcessingResult:
+        """Low-confidence pending_review draft for unclassifiable mail.
+
+        The model was unsure, so the draft is marked ``low_confidence`` and the
+        UI shows an explicit「置信度低」warning — it is never auto-sent, only the
+        boss can approve it. Saves rewriting the reply from scratch.
+        """
+
+        content_en = self.replier.generate(email_row, conversation)
+        reply = self.replier.build_reply(
+            email_row,
+            conversation,
+            content_en,
+            reply_type="general",
+            status="pending_review",
+        )
+        reply.low_confidence = True
+        log_action(self.db, "requires_review_low_confidence", "reply", reply.id)
+        self.db.commit()
+        return ProcessingResult(
+            message_id=parsed.message_id,
+            action="review",
+            email_id=email_row.id,
+            conversation_id=conversation.id,
+            reply_id=reply.id,
+            risk_level=classification.risk_level,
+            category=classification.category,
+        )
+
+    def _handle_ad(
+        self, parsed, email_row, conversation, *, blocked: bool
+    ) -> ProcessingResult:
+        """Archive a marketing/newsletter email to the「广告」tab.
+
+        The mail is ingested (visible + readable) but never auto-replied, never
+        aggregated, never ticketed. ``blocked`` distinguishes a blacklist hit
+        from a classifier-detected ad for the audit trail.
+        """
+
+        email_row.is_ad = True
+        # Ad mail never counts toward the unread badge — the boss reads it on
+        # the「广告」tab only when they choose to.
+        email_row.is_read = True
+        log_action(
+            self.db,
+            "ad_blocked" if blocked else "ad_archived",
+            "email",
+            email_row.id,
+            actor_id=None,
+        )
+        self.db.commit()
+        logger.info(
+            "Advertisement %s archived to ad tab (blocked=%s)",
+            parsed.message_id,
+            blocked,
+        )
+        return ProcessingResult(
+            message_id=parsed.message_id,
+            action="ad",
+            email_id=email_row.id,
+            conversation_id=conversation.id,
+            risk_level="low",
+            category="other",
         )
 
     def _auto_send(
@@ -1328,6 +1411,7 @@ class IngestService:
                 "paused": 0,
                 "duplicate": 0,
                 "silenced": 0,
+                "ad": 0,
                 "failed": 0,
                 "followup": 0,
             }
@@ -1367,6 +1451,7 @@ class IngestService:
                     "silenced",
                     "followup",
                     "paused",
+                    "ad",
                 ):
                     self.mark_seen(conn, uid)
             # Phase 2: one aggregated reply per conversation (synchronous).

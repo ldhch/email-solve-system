@@ -11,6 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.audit import router as audit_router
 from app.api.auth import router as auth_router
+from app.api.blocked_senders import router as blocked_senders_router
 from app.api.conversations import router as conversations_router
 from app.api.emails import router as emails_router
 from app.api.inbox import router as inbox_router
@@ -54,6 +55,7 @@ def create_app() -> FastAPI:
         system_router,
         auth_router,
         audit_router,
+        blocked_senders_router,
         inbox_router,
         conversations_router,
         emails_router,

@@ -28,7 +28,9 @@ from app.models.ticket import Ticket
 
 router = APIRouter(prefix="/api/v1", tags=["inbox"])
 
-_RISK_ORDER = {"high": 3, "medium": 2, "low": 1}
+# "unknown" sorts last (lowest) so a conversation that only contains
+# unclassifiable mail surfaces as「无法判定」and can be filtered by risk=unknown.
+_RISK_ORDER = {"high": 3, "medium": 2, "low": 1, "unknown": 0}
 
 
 def _fmt(dt) -> str | None:
@@ -70,6 +72,7 @@ def _conversation_rows(
     sort: str = "latest",
     conv_status: str | None = None,
     unread_only: bool = False,
+    ad_only: bool = False,
 ) -> list[dict]:
     """Fold emails into one row per conversation.
 
@@ -126,13 +129,29 @@ def _conversation_rows(
         latest_email = e_list[-1]  # ordered by received_at asc
         reply = latest_replies.get(cid)
 
+        # Ad conversations only surface on the「广告」tab; every other view
+        # hides them so marketing mail never pollutes the real inbox.
+        is_ad_conv = any(e.is_ad for e in e_list)
+        if ad_only and not is_ad_conv:
+            continue
+        if not ad_only and is_ad_conv:
+            continue
+
         # Highest risk seen in the thread wins, so an early high-risk email is
-        # never hidden by later low-key follow-ups.
-        risk = max(
-            (e.risk_level for e in e_list if e.risk_level in _RISK_ORDER),
-            key=lambda r: _RISK_ORDER[r],
-            default=None,
-        ) or conv.risk_level
+        # never hidden by later low-key follow-ups. "unknown" outranks "low":
+        # a thread that contains an unclassifiable mail surfaces as「无法判定」
+        # so the boss never misses the manual item behind a low-risk label.
+        risks = [e.risk_level for e in e_list if e.risk_level in _RISK_ORDER]
+        if "high" in risks:
+            risk = "high"
+        elif "medium" in risks:
+            risk = "medium"
+        elif "unknown" in risks:
+            risk = "unknown"
+        elif "low" in risks:
+            risk = "low"
+        else:
+            risk = conv.risk_level
 
         unread = sum(1 for e in e_list if not e.is_read)
         reply_ts = (reply.sent_at or reply.created_at) if reply else None
@@ -184,6 +203,7 @@ def _conversation_rows(
                     image_count_by_email.get(e.id, 0) for e in e_list
                 ),
                 "unread_count": unread,
+                "is_ad": is_ad_conv,
                 "risk_level": risk,
                 "summary_cn": summary,
                 "latest_status": latest_status,
@@ -223,6 +243,7 @@ async def list_inbox(
     sort: str = Query(default="latest"),
     conv_status: str | None = Query(default=None),
     unread_only: bool = Query(default=False),
+    ad: bool = Query(default=False),
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=100),
     keyword: str | None = Query(default=None),
@@ -239,6 +260,7 @@ async def list_inbox(
         sort=sort,
         conv_status=conv_status,
         unread_only=unread_only,
+        ad_only=ad,
     )
     total = len(rows)
     start = (page - 1) * size

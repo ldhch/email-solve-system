@@ -5,15 +5,38 @@ from __future__ import annotations
 from datetime import datetime
 from email.message import EmailMessage
 
+import json
+
 from sqlalchemy import select
 
 from app.llm.client import MockLLMClient
 from app.models.attachment import Attachment
+from app.models.blocked_sender import BlockedSender
 from app.models.email import Email
+from app.models.reply import Reply
 from app.services.ingest import IngestService, _html_to_text, parse_email
+from app.services.audit import utcnow
 from app.services.mailer import MailerService
 
 from conftest import FakeSMTP, make_raw_email
+
+
+class _LowConfidenceClassifier(MockLLMClient):
+    """Classifier that always returns confidence below the manual threshold."""
+
+    def chat(self, messages, system_prompt=None, max_tokens=None, temperature=None):
+        system_prompt_lower = (system_prompt or "").lower()
+        if "risk_level" in system_prompt_lower:  # triage classifier
+            return json.dumps(
+                {
+                    "risk_level": "low",
+                    "confidence": 0.3,  # < low_confidence_threshold (0.6)
+                    "category": "other",
+                    "chargeback_risk": False,
+                    "summary_cn": "低置信无法判定",
+                }
+            )
+        return super().chat(messages, system_prompt, max_tokens, temperature)
 
 
 def test_parse_plain_email() -> None:
@@ -163,3 +186,89 @@ def test_attachments_persisted(db, settings, fake_smtp_class, tmp_path) -> None:
     assert len(attachments) == 1
     assert attachments[0].filename == "shot.png"
     assert (tmp_path / attachments[0].stored_path.split("/")[-1]).exists()
+
+
+# ---------- 广告 (ad) / 黑名单 (blocked sender) / 无法判定 (low-confidence draft) ----------
+
+
+def _service(db, settings, client=None):
+    return IngestService(
+        db,
+        settings,
+        llm_client=client or MockLLMClient(settings),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+    )
+
+
+def test_process_one_ad_archived_by_keyword(db, settings) -> None:
+    parsed = parse_email(
+        make_raw_email(
+            subject="Your weekly picks",
+            body="Check out our newsletter! You're receiving this email because "
+            "you subscribed. Save 70% this weekend.",
+            from_email="promo@amazon.com",
+            message_id="<ad-1@example.com>",
+        ),
+        uid="1",
+    )
+    result = _service(db, settings).process_one(parsed)
+    assert result.action == "ad"
+    email = db.execute(select(Email)).scalars().one()
+    assert email.is_ad is True
+    assert email.is_read is True  # never counts toward the unread badge
+    assert db.execute(select(Reply)).scalars().all() == []  # never auto-replied
+
+
+def test_process_one_blocked_sender_archived(db, settings) -> None:
+    db.add(
+        BlockedSender(value="amazon.com", scope="domain", created_at=utcnow())
+    )
+    db.commit()
+    parsed = parse_email(
+        make_raw_email(
+            subject="Big sale",
+            body="Grab our best price today.",
+            from_email="promo@amazon.com",
+            message_id="<ad-2@example.com>",
+        ),
+        uid="1",
+    )
+    result = _service(db, settings).process_one(parsed)
+    assert result.action == "ad"
+    email = db.execute(select(Email)).scalars().one()
+    assert email.is_ad is True
+    # exact-address blacklist also matches
+    db.add(BlockedSender(value="spam@example.org", scope="email", created_at=utcnow()))
+    db.commit()
+    assert db.execute(
+        select(BlockedSender).where(BlockedSender.value == "spam@example.org")
+    ).scalar_one().scope == "email"
+
+
+def test_process_one_unknown_creates_low_confidence_draft(db, settings) -> None:
+    parsed = parse_email(
+        make_raw_email(
+            subject="Can you help",
+            body="Some confusing thing happened with my order.",
+            message_id="<unk-1@example.com>",
+        ),
+        uid="1",
+    )
+    result = _service(db, settings, _LowConfidenceClassifier(settings)).process_one(parsed)
+    assert result.action == "review"
+    assert result.risk_level == "unknown"
+    reply = db.execute(select(Reply)).scalars().one()
+    assert reply.status == "pending_review"
+    assert reply.low_confidence is True
+
+
+def test_process_one_empty_body_stays_manual(db, settings) -> None:
+    """Empty/unreadable mail has nothing to draft from — pure manual only."""
+    parsed = parse_email(
+        make_raw_email(subject="(no subject)", body="", message_id="<empty-1@example.com>"),
+        uid="1",
+    )
+    result = _service(db, settings, _LowConfidenceClassifier(settings)).process_one(parsed)
+    assert result.action == "manual"
+    assert result.risk_level == "unknown"
+    assert db.execute(select(Reply)).scalars().all() == []

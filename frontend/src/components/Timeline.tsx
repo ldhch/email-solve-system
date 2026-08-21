@@ -18,6 +18,7 @@ export interface TimelineItem {
   status?: string;
   reply_type?: string;
   source?: string;
+  low_confidence?: boolean;
   filename?: string;
   at?: string | null;
 }

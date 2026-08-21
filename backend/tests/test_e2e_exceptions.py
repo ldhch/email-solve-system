@@ -361,10 +361,15 @@ def test_exception_07_low_confidence_downgraded_to_manual(
     )
     imap = fake_imap([("1", raw)])
     summary = _service(db, settings, imap, llm=LowConfidenceLLM(settings)).fetch_and_process()
-    assert summary["manual"] == 1
+    # Low-confidence mail is never auto-sent; the readable body still gets a
+    # low-confidence draft the boss can approve, not a blank manual item.
+    assert summary["manual"] == 0
+    assert summary["review"] == 1
     email = db.execute(select(Email)).scalar_one()
     assert email.risk_level == "unknown"
-    assert db.execute(select(Reply)).scalars().all() == []
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.status == "pending_review"
+    assert reply.low_confidence is True
 
 
 # ---------- scenario 8: follow-up after reassurance ----------

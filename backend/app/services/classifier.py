@@ -47,6 +47,28 @@ DEFAULT_CHARGEBACK_KEYWORDS = [
     "platform complaint",
 ]
 
+# Marketing/newsletter/promotional markers for the keyword channel. Deliberately
+# avoids bare "unsubscribe" (a customer asking "please unsubscribe me" must hit
+# SILENCE_KEYWORDS instead, not be archived as an ad); the LLM channel catches
+# unsubscribe-style ad mail the keyword list cannot.
+AD_KEYWORDS = [
+    "newsletter",
+    "promo code",
+    "coupon",
+    "flash sale",
+    "limited time",
+    "you're receiving this",
+    "you are receiving this",
+    "marketing email",
+    "opt-out",
+    "opt out",
+    "to unsubscribe",
+    "unsubscribe at",
+    "unsubscribe link",
+    "退订",
+    "广告邮件",
+]
+
 # PRD edge case 9: the customer asks not to be contacted again. When detected,
 # the customer is silenced for 72h (no auto-replies, mail still ingested).
 SILENCE_KEYWORDS = [
@@ -78,6 +100,7 @@ Read the customer email and return ONE strict JSON object with exactly these key
   "category": "<one of: logistics_inquiry, order_modification, invoice, product_spec,
                usage, policy, warranty, gratitude, refund_request, other>",
   "chargeback_risk": true | false,
+  "is_advertisement": true | false,
   "summary_cn": "<short Chinese summary, 20-40 chars>"
 }
 
@@ -87,6 +110,8 @@ Rules:
 - refund/return/exchange requests: category refund_request, risk medium.
 - logistics/tracking/order changes/invoices: risk medium (no ERP data).
 - product specs, usage questions, policy/warranty info, thanks: risk low.
+- is_advertisement: true for marketing/newsletter/promotional or spam mail
+  (coupon codes, "you're receiving this email", unsubscribe links, sales promos).
 - If you cannot decide, use confidence < 0.5 and category "other".
 - Never invent facts. Do not output anything besides the JSON object.
 """
@@ -115,6 +140,7 @@ class Classification:
     category: str
     chargeback_risk: bool
     summary_cn: str
+    is_ad: bool = False  # marketing/newsletter/promotional mail
 
 
 RISK_ACTIONS = {
@@ -155,15 +181,16 @@ class ClassifierService:
         self.llm_client = llm_client
         keywords = settings.chargeback_keyword_list or DEFAULT_CHARGEBACK_KEYWORDS
         self.chargeback_keywords = [k.lower() for k in keywords]
+        self.ad_keywords = [k.lower() for k in AD_KEYWORDS]
         self.system_prompt = _load_prompt()
 
-    def _keyword_hit(self, text: str) -> bool:
+    def _keyword_hit(self, text: str, keywords: list[str]) -> bool:
         lowered = text.lower()
         # Word-boundary match: avoid short tokens like "ftc"/"bbb" matching
         # "facts"/"attic"/"abbey" and causing false chargeback escalations.
         return any(
             re.search(rf"\b{re.escape(kw)}\b", lowered)
-            for kw in self.chargeback_keywords
+            for kw in keywords
         )
 
     @staticmethod
@@ -224,7 +251,7 @@ class ClassifierService:
         if category not in CATEGORIES:
             category = "other"
 
-        keyword_hit = self._keyword_hit(user_content)
+        keyword_hit = self._keyword_hit(user_content, self.chargeback_keywords)
         llm_flag = bool(data.get("chargeback_risk", False))
         chargeback_risk = keyword_hit or llm_flag
 
@@ -234,6 +261,17 @@ class ClassifierService:
                 "Chargeback risk detected (keyword=%s llm=%s) for %s",
                 keyword_hit,
                 llm_flag,
+                parsed_email.message_id,
+            )
+
+        ad_hit = self._keyword_hit(user_content, self.ad_keywords)
+        llm_ad = bool(data.get("is_advertisement", False))
+        is_ad = ad_hit or llm_ad
+        if is_ad:
+            logger.info(
+                "Advertisement detected (keyword=%s llm=%s) for %s",
+                ad_hit,
+                llm_ad,
                 parsed_email.message_id,
             )
 
@@ -251,4 +289,5 @@ class ClassifierService:
             category=category,
             chargeback_risk=chargeback_risk,
             summary_cn=str(data.get("summary_cn", "")).strip(),
+            is_ad=is_ad,
         )

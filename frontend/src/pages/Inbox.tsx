@@ -25,6 +25,7 @@ interface InboxItem {
   sla_breached: boolean;
   sla_near: boolean;
   is_read: boolean;
+  is_ad: boolean;
 }
 
 interface ConversationData {
@@ -33,6 +34,7 @@ interface ConversationData {
   customer: { email: string; display_name: string | null };
   status: string;
   risk_level: string | null;
+  is_ad?: boolean;
   retention_attempts: number;
   sla_deadline: string | null;
   suggested_merge_conversation_id: number | null;
@@ -95,9 +97,19 @@ export default function Inbox() {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [total, setTotal] = useState(0);
   const [filter, setFilter] = useState<
-    "all" | "unread" | "pending_review" | "high"
+    "all" | "unread" | "pending_review" | "unknown" | "high" | "ad"
   >("all");
   const [pendingCount, setPendingCount] = useState(0);
+  const [unknownCount, setUnknownCount] = useState(0);
+  const [adCount, setAdCount] = useState(0);
+  // Pending "block this sender" confirm target: the boss picks between blocking
+  // the whole domain or just this one address from the expanded row.
+  const [blockCandidate, setBlockCandidate] = useState<{
+    id: number;
+    email: string;
+  } | null>(null);
+  const [blockError, setBlockError] = useState("");
+  const [blocking, setBlocking] = useState(false);
   const [keywordInput, setKeywordInput] = useState("");
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -135,6 +147,8 @@ export default function Inbox() {
             : { page: 1, size: Math.max(itemsRef.current.length, 20) };
         if (filter === "pending_review") params.status = "pending_review";
         if (filter === "high") params.risk_level = "high";
+        if (filter === "unknown") params.risk_level = "unknown";
+        if (filter === "ad") params.ad = true;
         if (filter === "unread") params.unread_only = true;
         if (keyword.trim()) params.keyword = keyword.trim();
         const resp = await http.get("/inbox", { params });
@@ -179,28 +193,38 @@ export default function Inbox() {
     pageRef.current = 1;
   }, [keyword]);
 
-  // Count of conversations waiting for review, shown as a badge on the
-  // "待审核" tab (independent of the active filter).
-  const loadPendingCount = useCallback(async () => {
-    try {
-      const resp = await http.get("/inbox", {
-        params: { status: "pending_review", size: 1 },
-      });
-      setPendingCount(dataOf<{ total: number }>(resp).total);
-    } catch {
-      // keep the last known count
-    }
+  // Counts for the tab badges (待审核 / 无法判定 / 广告), independent of the
+  // active filter. Fetched together so the polling interval stays cheap.
+  const loadCounts = useCallback(async () => {
+    const fetchTotal = async (params: Record<string, string | number | boolean>) => {
+      try {
+        const resp = await http.get("/inbox", {
+          params: { ...params, size: 1 },
+        });
+        return dataOf<{ total: number }>(resp).total;
+      } catch {
+        return null; // keep the last known count
+      }
+    };
+    const [p, u, a] = await Promise.all([
+      fetchTotal({ status: "pending_review" }),
+      fetchTotal({ risk_level: "unknown" }),
+      fetchTotal({ ad: true }),
+    ]);
+    if (p != null) setPendingCount(p);
+    if (u != null) setUnknownCount(u);
+    if (a != null) setAdCount(a);
   }, []);
 
   useEffect(() => {
     load();
-    loadPendingCount();
+    loadCounts();
     const timer = setInterval(() => {
       if (!loadingRef.current) load("replace");
-      loadPendingCount();
+      loadCounts();
     }, 30000);
     return () => clearInterval(timer);
-  }, [load, loadPendingCount]);
+  }, [load, loadCounts]);
 
   // Keep a live copy of the loaded rows so a polling replace can refetch the
   // full visible set (with fresh sort order) regardless of how many were loaded.
@@ -298,8 +322,25 @@ export default function Inbox() {
     { key: "all" as const, label: "全部" },
     { key: "unread" as const, label: "未读" },
     { key: "pending_review" as const, label: "待审核" },
+    { key: "unknown" as const, label: "无法判定" },
     { key: "high" as const, label: "高风险" },
+    { key: "ad" as const, label: "广告" },
   ];
+
+  async function blockSender(email: string, scope: "email" | "domain") {
+    setBlocking(true);
+    setBlockError("");
+    try {
+      await http.post("/blocked-senders", { value: email, scope });
+      setBlockCandidate(null);
+      load("replace");
+      loadCounts();
+    } catch (err) {
+      setBlockError(errorText(err));
+    } finally {
+      setBlocking(false);
+    }
+  }
 
   return (
     <Layout>
@@ -338,6 +379,28 @@ export default function Inbox() {
                     {pendingCount}
                   </span>
                 )}
+                {t.key === "unknown" && unknownCount > 0 && (
+                  <span
+                    className={`ml-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[11px] font-semibold tabular-nums ${
+                      filter === t.key
+                        ? "bg-white text-accent"
+                        : "bg-[#6B7280] text-white"
+                    }`}
+                  >
+                    {unknownCount}
+                  </span>
+                )}
+                {t.key === "ad" && adCount > 0 && (
+                  <span
+                    className={`ml-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[11px] font-semibold tabular-nums ${
+                      filter === t.key
+                        ? "bg-white text-accent"
+                        : "bg-[#9C731A] text-white"
+                    }`}
+                  >
+                    {adCount}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -361,7 +424,7 @@ export default function Inbox() {
             <div ref={listScrollRef} className="flex-1 overflow-y-auto">
               <ul className="divide-y divide-line">
                 {items.map((item) => (
-                  <li key={item.id}>
+                  <li key={item.id} className="relative">
                     <button
                       onClick={() => select(item.id)}
                       className={`relative w-full text-left px-4 py-3 transition-colors ${
@@ -370,7 +433,9 @@ export default function Inbox() {
                           : item.unread_count > 0
                             ? "bg-[#F7FAFF]"
                             : "hover:bg-[#F7F9FB]"
-                      } ${item.unread_count > 0 ? "font-semibold" : "font-normal"}`}
+                      } ${item.unread_count > 0 ? "font-semibold" : "font-normal"} ${
+                        item.is_ad ? "pr-16" : ""
+                      }`}
                     >
                       {RISK_RAIL[item.risk_level ?? ""] && (
                         <span
@@ -417,7 +482,13 @@ export default function Inbox() {
                       {item.summary_cn || "—"}
                     </div>
                     <div className="mt-1.5 flex items-center gap-2">
-                      <RiskTag risk={item.risk_level} />
+                      {item.is_ad ? (
+                        <span className="inline-block px-1.5 py-0.5 rounded bg-[#FDF1DC] text-[#B45309] text-[11px] font-medium">
+                          广告
+                        </span>
+                      ) : (
+                        <RiskTag risk={item.risk_level} />
+                      )}
                       <span className="text-[11px] text-sub tabular-nums">
                         {item.email_count} 封
                       </span>
@@ -436,6 +507,53 @@ export default function Inbox() {
                       </span>
                     </div>
                   </button>
+                  {item.is_ad && (
+                    <button
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setBlockError("");
+                        setBlockCandidate({ id: item.id, email: item.from_email });
+                      }}
+                      className="absolute right-2 top-2 rounded px-1.5 py-0.5 text-[11px] text-sub hover:bg-risk-high-tint hover:text-risk-high"
+                      title="拉黑此发件人"
+                    >
+                      🚫 拉黑
+                    </button>
+                  )}
+                  {blockCandidate?.id === item.id && (
+                    <div className="border-t border-line bg-[#FFFBEB] px-4 py-2.5">
+                      <p className="mb-1.5 text-[12px] text-ink">
+                        拉黑 <span className="font-medium">{item.from_email}</span> ？
+                      </p>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          disabled={blocking}
+                          onClick={() => blockSender(item.from_email, "domain")}
+                          className="px-2 py-1 rounded bg-[#B45309] text-white text-[11px] font-medium hover:bg-[#92400E] disabled:opacity-50"
+                        >
+                          拉黑整个域名
+                        </button>
+                        <button
+                          disabled={blocking}
+                          onClick={() => blockSender(item.from_email, "email")}
+                          className="px-2 py-1 rounded border border-line bg-white text-[11px] text-ink hover:bg-[#F7F9FB] disabled:opacity-50"
+                        >
+                          仅此发件人
+                        </button>
+                        <button
+                          disabled={blocking}
+                          onClick={() => setBlockCandidate(null)}
+                          className="px-2 py-1 text-[11px] text-sub hover:text-ink disabled:opacity-50"
+                        >
+                          取消
+                        </button>
+                      </div>
+                      {blockError && (
+                        <p className="mt-1.5 text-[11px] text-risk-high">{blockError}</p>
+                      )}
+                    </div>
+                  )}
                 </li>
               ))}
               </ul>
@@ -494,10 +612,35 @@ export default function Inbox() {
                     >
                       下一条 ›
                     </button>
-                    <RiskTag risk={conv.risk_level} />
+                    {conv.is_ad ? (
+                      <span className="inline-block px-1.5 py-0.5 rounded bg-[#FDF1DC] text-[#B45309] text-[11px] font-medium">
+                        广告
+                      </span>
+                    ) : (
+                      <RiskTag risk={conv.risk_level} />
+                    )}
                     <span className="px-2 py-0.5 rounded bg-[#EFF1F3] text-sub text-[11px]">
                       {CONV_STATUS_LABEL[conv.status] || conv.status}
                     </span>
+                    {conv.is_ad && (
+                      <button
+                        onClick={() => {
+                          const domain = (conv.customer.email.split("@")[1] ?? "").trim();
+                          if (
+                            domain &&
+                            window.confirm(
+                              `拉黑域名 @${domain}？之后该来源邮件直接进「广告」tab，不再自动回复。`,
+                            )
+                          ) {
+                            blockSender(conv.customer.email, "domain");
+                          }
+                        }}
+                        className="px-2 py-1 border border-line rounded text-[12px] text-sub hover:bg-risk-high-tint hover:text-risk-high"
+                        title="拉黑此发件人的域名"
+                      >
+                        🚫 拉黑域名
+                      </button>
+                    )}
                     {selectedItem && selectedItem.unread_count > 0 && (
                       <span className="text-[11px] text-accent tabular-nums">
                         {selectedItem.unread_count} 封未读

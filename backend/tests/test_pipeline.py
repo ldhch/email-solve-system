@@ -142,7 +142,7 @@ def test_high_risk_smtp_failure_keeps_email_unseen_but_creates_ticket(
     assert imap.seen == []  # retry the same draft next poll, no duplicate ticket
 
 
-def test_unknown_risk_manual_no_reassurance_no_ticket(
+def test_unknown_risk_low_confidence_draft_no_reassurance_no_ticket(
     db, settings, fake_smtp_class, fake_imap
 ) -> None:
     raw = make_raw_email(
@@ -164,10 +164,14 @@ def test_unknown_risk_manual_no_reassurance_no_ticket(
     )
     summary = service.fetch_and_process()
 
-    assert summary["manual"] == 1
+    # Readable body -> a low-confidence draft for the boss (not auto-sent).
+    assert summary["review"] == 1
+    assert summary["manual"] == 0
     email = db.execute(select(Email)).scalar_one()
     assert email.risk_level == "unknown"
-    assert db.execute(select(Reply)).scalars().all() == []
+    reply = db.execute(select(Reply)).scalar_one()
+    assert reply.status == "pending_review"
+    assert reply.low_confidence is True
     assert db.execute(select(Ticket)).scalars().all() == []
 
 

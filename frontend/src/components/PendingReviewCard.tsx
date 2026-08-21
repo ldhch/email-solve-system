@@ -50,6 +50,11 @@ export function PendingReviewCard({
             key={t.reply_id}
             className="rounded border border-accent/15 bg-white px-3 py-2"
           >
+            {t.low_confidence && (
+              <p className="mb-1.5 inline-block rounded bg-[#FDF1DC] px-1.5 py-0.5 text-[11px] font-medium text-[#B45309]">
+                置信度低 · 发送前请核对
+              </p>
+            )}
             <div className="flex items-start justify-between gap-3">
               <p className="min-w-0 text-[12.5px] leading-normal text-ink line-clamp-2">
                 {(t.content_cn || t.content_en || "").replace(/\s+/g, " ").trim()}

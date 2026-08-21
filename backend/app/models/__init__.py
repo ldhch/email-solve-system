@@ -2,6 +2,7 @@
 
 from app.models.attachment import Attachment
 from app.models.audit import AuditLog
+from app.models.blocked_sender import BlockedSender
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.email import Email
@@ -16,6 +17,7 @@ from app.models.user import User
 __all__ = [
     "Attachment",
     "AuditLog",
+    "BlockedSender",
     "Conversation",
     "Customer",
     "Email",

@@ -52,7 +52,7 @@ def test_keyword_boundary_avoids_false_positive() -> None:
     )
     service = ClassifierService(settings, llm)
     # "softcover" contains the letters f-t-c, but must NOT trigger "ftc".
-    assert service._keyword_hit("I bought a softcover book") is False
+    assert service._keyword_hit("I bought a softcover book", service.chargeback_keywords) is False
     assert service.classify(_parsed("I bought a softcover book")).chargeback_risk is False
 
 

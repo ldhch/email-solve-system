@@ -31,6 +31,8 @@ def _seed_conversation(
     reply: dict | None = None,
     ticket: dict | None = None,
     customer_email: str = "c@example.com",
+    email_risk: str = "medium",
+    is_ad: bool = False,
 ) -> dict:
     """Insert customer/conversation/emails(+optional reply/ticket), return ids."""
 
@@ -57,12 +59,14 @@ def _seed_conversation(
                 conversation_id=conv.id,
                 message_id=f"<admin-{i}-{uid}@example.com>",
                 subject=f"Order question {i}",
-                from_email="c@example.com",
+                from_email=customer_email,
                 to_email="bot@example.com",
                 body_text=f"Question body {i}",
                 is_inbound=True,
                 received_at=utcnow(),
-                risk_level="medium",
+                risk_level=email_risk,
+                is_ad=is_ad,
+                is_read=is_ad,  # ad mail never counts toward unread
                 category="policy",
                 summary_cn="中文摘要",
             )
@@ -847,3 +851,147 @@ def test_build_reply_sanitizes_content_en(settings, session_factory) -> None:
         )
         db.commit()
         assert reply.content_en == "Dear John,\nPlease provide order #1."
+
+
+# ---------- 无法判定 (unknown) / 广告 (ad) / 黑名单 (blocked senders) ----------
+
+
+def test_inbox_unknown_filter(settings, session_factory) -> None:
+    _seed_conversation(
+        session_factory, customer_email="weird@example.com", email_risk="unknown"
+    )
+    _seed_conversation(session_factory, customer_email="a@example.com", email_risk="low")
+    client = _authed_client(settings, session_factory)
+    try:
+        unknown = api(client, "GET", "/api/v1/inbox", params={"risk_level": "unknown"})
+        body = unknown.json()["data"]
+        assert body["total"] == 1
+        assert body["items"][0]["from_email"] == "weird@example.com"
+        assert body["items"][0]["risk_level"] == "unknown"
+        low = api(client, "GET", "/api/v1/inbox", params={"risk_level": "low"})
+        assert low.json()["data"]["total"] == 1
+    finally:
+        close_client(client)
+
+
+def test_inbox_unknown_outranks_low_in_thread(settings, session_factory) -> None:
+    """A thread mixing low-risk + unclassifiable mail surfaces as「无法判定」."""
+    ids = _seed_conversation(
+        session_factory, customer_email="mix@example.com", email_risk="low"
+    )
+    with session_factory() as db:
+        db.add(
+            Email(
+                conversation_id=ids["conversation_id"],
+                message_id="<mix-weird@example.com>",
+                subject="weird",
+                from_email="mix@example.com",
+                body_text="gibberish body",
+                is_inbound=True,
+                received_at=utcnow(),
+                risk_level="unknown",
+                category="other",
+                summary_cn="无法判定",
+            )
+        )
+        db.commit()
+    client = _authed_client(settings, session_factory)
+    try:
+        unknown = api(client, "GET", "/api/v1/inbox", params={"risk_level": "unknown"})
+        assert unknown.json()["data"]["total"] == 1
+        assert unknown.json()["data"]["items"][0]["risk_level"] == "unknown"
+        low = api(client, "GET", "/api/v1/inbox", params={"risk_level": "low"})
+        assert low.json()["data"]["total"] == 0
+    finally:
+        close_client(client)
+
+
+def test_inbox_ad_filter_and_exclusion(settings, session_factory) -> None:
+    _seed_conversation(
+        session_factory, customer_email="promo@amazon.com", is_ad=True
+    )
+    _seed_conversation(session_factory, customer_email="real@example.com")
+    client = _authed_client(settings, session_factory)
+    try:
+        all_rows = api(client, "GET", "/api/v1/inbox").json()["data"]
+        assert all_rows["total"] == 1  # ad conversation hidden from the main list
+        assert all_rows["items"][0]["from_email"] == "real@example.com"
+
+        ad_rows = api(client, "GET", "/api/v1/inbox", params={"ad": "true"}).json()["data"]
+        assert ad_rows["total"] == 1
+        assert ad_rows["items"][0]["is_ad"] is True
+        assert ad_rows["items"][0]["from_email"] == "promo@amazon.com"
+
+        unread = api(client, "GET", "/api/v1/inbox/unread-count").json()["data"]
+        assert unread["unread"] == 1  # ad mail never counts toward unread
+    finally:
+        close_client(client)
+
+
+def test_blocked_senders_crud(settings, session_factory) -> None:
+    client = _authed_client(settings, session_factory)
+    try:
+        r1 = api(
+            client,
+            "POST",
+            "/api/v1/blocked-senders",
+            json={"value": "spam@bad.com", "scope": "email"},
+        )
+        assert r1.status_code == 200
+        assert r1.json()["data"]["scope"] == "email"
+
+        dup = api(
+            client,
+            "POST",
+            "/api/v1/blocked-senders",
+            json={"value": "spam@bad.com", "scope": "email"},
+        )
+        assert dup.status_code == 409
+
+        r2 = api(
+            client,
+            "POST",
+            "/api/v1/blocked-senders",
+            json={"value": "@amazon.com", "scope": "domain"},
+        )
+        assert r2.status_code == 200
+        # "@" prefix is stripped for domains
+        assert r2.json()["data"]["value"] == "amazon.com"
+
+        bad_domain = api(
+            client,
+            "POST",
+            "/api/v1/blocked-senders",
+            json={"value": "@bad", "scope": "domain"},
+        )
+        assert bad_domain.status_code == 400
+        bad_email = api(
+            client,
+            "POST",
+            "/api/v1/blocked-senders",
+            json={"value": "not-an-email", "scope": "email"},
+        )
+        assert bad_email.status_code == 400
+
+        items = api(client, "GET", "/api/v1/blocked-senders").json()["data"]["items"]
+        assert len(items) == 2
+
+        deleted = api(client, "DELETE", f"/api/v1/blocked-senders/{items[0]['id']}")
+        assert deleted.status_code == 200
+        remaining = api(client, "GET", "/api/v1/blocked-senders").json()["data"]["items"]
+        assert len(remaining) == 1
+    finally:
+        close_client(client)
+
+
+def test_conversation_detail_marks_ad(settings, session_factory) -> None:
+    ids = _seed_conversation(
+        session_factory, customer_email="promo@shop.com", is_ad=True
+    )
+    client = _authed_client(settings, session_factory)
+    try:
+        detail = api(client, "GET", f"/api/v1/conversations/{ids['conversation_id']}")
+        assert detail.status_code == 200
+        assert detail.json()["data"]["is_ad"] is True
+    finally:
+        close_client(client)

@@ -34,6 +34,9 @@ class Email(Base):
     is_inbound: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     has_attachments: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    # Marketing/newsletter/promotional email: ingested for the "广告" tab but
+    # never auto-replied, never aggregated into a customer conversation.
+    is_ad: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     # Set while the system is emergency-paused: the mail is ingested (visible
     # in the inbox) but no reply was produced. `_process_pending_after_pause`
     # clears it after routing resumes, in received order (M-19).

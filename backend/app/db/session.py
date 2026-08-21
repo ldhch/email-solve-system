@@ -177,6 +177,31 @@ def _ensure_email_content_cn_column(engine: Engine) -> None:
             conn.execute(text("ALTER TABLE emails ADD COLUMN content_cn TEXT"))
 
 
+def _ensure_email_is_ad_column(engine: Engine) -> None:
+    """Add ``emails.is_ad`` to DBs created before the column existed."""
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(emails)"))}
+        if "is_ad" not in cols:
+            conn.execute(
+                text("ALTER TABLE emails ADD COLUMN is_ad BOOLEAN NOT NULL DEFAULT 0")
+            )
+
+
+def _ensure_reply_low_confidence_column(engine: Engine) -> None:
+    """Add ``replies.low_confidence`` to DBs created before the column existed."""
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(replies)"))}
+        if "low_confidence" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE replies "
+                    "ADD COLUMN low_confidence BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
+
+
 def init_db(settings: Settings | None = None) -> None:
     """Create all tables (create_all) and seed defaults. No migrations."""
 
@@ -191,6 +216,8 @@ def init_db(settings: Settings | None = None) -> None:
     _ensure_email_pending_after_pause_column(engine)
     _ensure_reply_source_column(engine)
     _ensure_email_content_cn_column(engine)
+    _ensure_email_is_ad_column(engine)
+    _ensure_reply_low_confidence_column(engine)
     seed(settings)
 
 
