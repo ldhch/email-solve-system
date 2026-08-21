@@ -8,6 +8,7 @@ from app.models.email import Email
 from app.models.knowledge_doc import KnowledgeDoc
 from app.models.qa_pair import QAPair
 from app.models.reply import Reply
+from app.models.reply_template import ReplyTemplate
 from app.models.system_state import SystemState
 from app.models.ticket import Ticket
 from app.models.user import User
@@ -21,6 +22,7 @@ __all__ = [
     "KnowledgeDoc",
     "QAPair",
     "Reply",
+    "ReplyTemplate",
     "SystemState",
     "Ticket",
     "User",

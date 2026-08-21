@@ -15,6 +15,7 @@ interface InboxItem {
   from_email: string;
   customer_name: string | null;
   email_count: number;
+  attachment_count: number;
   unread_count: number;
   risk_level: string | null;
   summary_cn: string | null;
@@ -35,6 +36,13 @@ interface ConversationData {
   retention_attempts: number;
   sla_deadline: string | null;
   suggested_merge_conversation_id: number | null;
+  open_tickets?: {
+    id: number;
+    status: string;
+    sla_deadline: string | null;
+    is_overdue: boolean;
+  }[];
+  resolved_ticket_count?: number;
   timeline: TimelineItem[];
 }
 
@@ -64,6 +72,25 @@ function Empty({ text }: { text: string }) {
   );
 }
 
+// Blue paperclip glyph used in the "图×N" attachment badge. An inline SVG (not
+// an emoji) so its stroke can be tinted with the accent color and scaled freely.
+function PaperclipIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </svg>
+  );
+}
+
 export default function Inbox() {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -78,6 +105,11 @@ export default function Inbox() {
   const requestSeq = useRef(0);
   const itemsRef = useRef<InboxItem[]>([]);
   const pageRef = useRef(1);
+  // Scroll container + bottom sentinel for infinite scroll (replaces the old
+  // "加载更多" button): when the sentinel enters view and more rows exist, the
+  // next page loads automatically.
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [conv, setConv] = useState<ConversationData | null>(null);
@@ -175,6 +207,27 @@ export default function Inbox() {
   useEffect(() => {
     itemsRef.current = items;
   }, [items]);
+
+  // Infinite scroll: watch the sentinel at the bottom of the scroll container.
+  // It only fires when more rows exist and no request is in flight, so it can
+  // never double-fetch or load past the end. Root is the list container itself
+  // (the aside scrolls internally, not the window). Re-armed whenever the row
+  // count / total / filter changes so a reset re-observes the fresh sentinel.
+  useEffect(() => {
+    const container = listScrollRef.current;
+    const sentinel = sentinelRef.current;
+    if (!container || !sentinel || itemsRef.current.length >= total) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting) && !loadingRef.current) {
+          load("append");
+        }
+      },
+      { root: container, rootMargin: "150px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [items.length, total, load]);
 
   // Clear the reading pane only when the filtered list becomes empty. If the
   // selected row disappears from a later page, keep the open conversation.
@@ -305,49 +358,61 @@ export default function Inbox() {
           ) : items.length === 0 ? (
             <Empty text="没有匹配的会话 — 客户来信会自动归并到这里。" />
           ) : (
-            <ul className="flex-1 overflow-y-auto divide-y divide-line">
-              {items.map((item) => (
-                <li key={item.id}>
-                  <button
-                    onClick={() => select(item.id)}
-                    className={`relative w-full text-left px-4 py-3 transition-colors ${
-                      selectedId === item.id
-                        ? "bg-accent-tint"
-                        : item.unread_count > 0
-                          ? "bg-[#F7FAFF]"
-                          : "hover:bg-[#F7F9FB]"
-                    } ${item.unread_count > 0 ? "font-semibold" : "font-normal"}`}
-                  >
-                    {RISK_RAIL[item.risk_level ?? ""] && (
-                      <span
-                        className={`absolute left-0 top-0 bottom-0 w-[3px] ${
-                          RISK_RAIL[item.risk_level!]
-                        }`}
-                      />
-                    )}
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`w-[7px] h-[7px] shrink-0 ${
-                          item.unread_count > 0 ? "bg-accent" : "bg-transparent"
-                        }`}
-                      />
-                      <span className="text-[13px] font-semibold text-ink truncate">
-                        {item.customer_name || item.from_email}
-                      </span>
-                      {item.unread_count > 0 && (
-                        <span className="text-[11px] text-accent font-medium tabular-nums">
-                          未读 {item.unread_count}
-                        </span>
+            <div ref={listScrollRef} className="flex-1 overflow-y-auto">
+              <ul className="divide-y divide-line">
+                {items.map((item) => (
+                  <li key={item.id}>
+                    <button
+                      onClick={() => select(item.id)}
+                      className={`relative w-full text-left px-4 py-3 transition-colors ${
+                        selectedId === item.id
+                          ? "bg-accent-tint"
+                          : item.unread_count > 0
+                            ? "bg-[#F7FAFF]"
+                            : "hover:bg-[#F7F9FB]"
+                      } ${item.unread_count > 0 ? "font-semibold" : "font-normal"}`}
+                    >
+                      {RISK_RAIL[item.risk_level ?? ""] && (
+                        <span
+                          className={`absolute left-0 top-0 bottom-0 w-[3px] ${
+                            RISK_RAIL[item.risk_level!]
+                          }`}
+                        />
                       )}
-                      {item.latest_status && (
-                        <span className="ml-auto shrink-0 text-[11px] text-sub">
-                          {STATUS_LABEL[item.latest_status] || item.latest_status}
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`w-[9px] h-[9px] shrink-0 rounded-full ${
+                            item.unread_count > 0 ? "bg-accent" : "bg-transparent"
+                          }`}
+                        />
+                        <span className="text-[13px] font-semibold text-ink truncate">
+                          {item.customer_name || item.from_email}
                         </span>
-                      )}
-                    </div>
-                    <div className="mt-0.5 text-[12.5px] text-sub truncate">
-                      {item.subject}
-                    </div>
+                        {item.unread_count > 0 && (
+                          <span className="text-[11px] text-accent font-medium tabular-nums">
+                            未读 {item.unread_count}
+                          </span>
+                        )}
+                        {item.latest_status && (
+                          <span className="ml-auto shrink-0 text-[11px] text-sub">
+                            {STATUS_LABEL[item.latest_status] || item.latest_status}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-sub">
+                        <span className="min-w-0 flex-1 truncate">
+                          {item.subject}
+                        </span>
+                        {item.attachment_count > 0 && (
+                          <span
+                            className="flex shrink-0 items-center gap-1 rounded bg-accent-tint px-1.5 py-0.5 text-[12px] font-medium leading-none text-accent"
+                            title={`含 ${item.attachment_count} 张图片`}
+                          >
+                            <PaperclipIcon className="h-3.5 w-3.5" />
+                            图×{item.attachment_count}
+                          </span>
+                        )}
+                      </div>
                     <div className="mt-0.5 text-[12.5px] text-[#8A919C] truncate">
                       {item.summary_cn || "—"}
                     </div>
@@ -373,19 +438,19 @@ export default function Inbox() {
                   </button>
                 </li>
               ))}
-            </ul>
+              </ul>
+              {/* Sentinel: becomes visible at the bottom of the scroll area and
+                  triggers the next page via IntersectionObserver. */}
+              <div ref={sentinelRef} className="h-2" aria-hidden="true" />
+            </div>
           )}
+
           <div className="shrink-0 flex items-center justify-between px-4 py-2.5 border-t border-line text-[12px] text-sub">
             <span className="tabular-nums">共 {total} 个会话</span>
             {loading ? (
               <span>加载中…</span>
             ) : items.length < total ? (
-              <button
-                onClick={() => load("append")}
-                className="px-2 py-0.5 border border-line rounded hover:bg-[#F7F9FB]"
-              >
-                加载更多
-              </button>
+              <span className="text-[11px] text-[#9AA1AB]">继续下滑加载更多</span>
             ) : (
               <span>已全部加载</span>
             )}
@@ -467,6 +532,47 @@ export default function Inbox() {
                   </div>
                 </div>
               </div>
+              {/* Merged ticket bar: open high-risk tickets show their SLA /
+                  overdue state here; replying to the customer auto-resolves them. */}
+              {conv.open_tickets && conv.open_tickets.length > 0 && (
+                <div className="shrink-0 border-b border-line bg-accent-tint/60 px-6 py-2.5">
+                  {conv.open_tickets.map((t) => (
+                    <div
+                      key={t.id}
+                      className="flex flex-wrap items-center gap-2 text-[12.5px]"
+                    >
+                      <span className={t.is_overdue ? "text-risk-high" : "text-accent"}>
+                        ⚠
+                      </span>
+                      <span
+                        className={
+                          t.is_overdue
+                            ? "font-medium text-risk-high"
+                            : "font-medium text-ink"
+                        }
+                      >
+                        高风险工单
+                      </span>
+                      {t.is_overdue ? (
+                        <span className="text-risk-high font-medium">
+                          SLA 已逾期 · 尽快回复客户
+                        </span>
+                      ) : t.sla_deadline ? (
+                        <span className="text-sub">
+                          SLA 截止 {formatLocal(t.sla_deadline)}
+                        </span>
+                      ) : null}
+                      <span className="ml-auto text-sub">回复客户后自动标记解决</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(!conv.open_tickets || conv.open_tickets.length === 0) &&
+                (conv.resolved_ticket_count ?? 0) > 0 && (
+                  <div className="shrink-0 border-b border-line bg-[#F7F9FB] px-6 py-2 text-[12.5px] text-sub">
+                    ✓ 高风险工单已解决（{conv.resolved_ticket_count} 条）
+                  </div>
+                )}
               <div className="flex-1 px-6 py-5 overflow-y-auto">
                 <PendingReviewCard items={conv.timeline} onRefresh={refresh} />
                 <Timeline

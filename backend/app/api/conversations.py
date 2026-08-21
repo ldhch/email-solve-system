@@ -163,6 +163,10 @@ async def conversation_detail(
 
     open_tickets = [t for t in conv.tickets if not t.is_deleted and t.status != "resolved"]
     sla_deadline = max((t.sla_deadline for t in open_tickets), default=None)
+    now = utcnow()
+    resolved_ticket_count = sum(
+        1 for t in conv.tickets if not t.is_deleted and t.status == "resolved"
+    )
 
     # PRD edge case 15: same display name on a different address is surfaced as
     # a "possible same customer" hint; the boss decides whether to merge.
@@ -196,6 +200,20 @@ async def conversation_detail(
             "retention_attempts": conv.retention_attempts,
             "suggested_merge_conversation_id": suggested_merge_conversation_id,
             "sla_deadline": _fmt(sla_deadline),
+            # Ticket state for the merged ticket bar: open high-risk tickets
+            # (with SLA + overdue flag) and a count of resolved ones.
+            "open_tickets": [
+                {
+                    "id": t.id,
+                    "status": t.status,
+                    "sla_deadline": _fmt(t.sla_deadline),
+                    "is_overdue": (
+                        t.sla_deadline < now and t.status in ("pending", "in_progress")
+                    ),
+                }
+                for t in open_tickets
+            ],
+            "resolved_ticket_count": resolved_ticket_count,
             "timeline": timeline,
         }
     )
@@ -225,7 +243,9 @@ async def manual_reply(
 
     llm = build_llm_client(settings)
     try:
-        content_en = TranslatorService(llm).translate_to_english(payload.content_cn)
+        content_en = TranslatorService(llm).translate_to_letter(
+            payload.content_cn, customer_name=conv.customer.display_name
+        )
     except LLMError:
         raise HTTPException(status_code=422, detail="LLM_FAILED") from None
 
@@ -260,6 +280,30 @@ async def manual_reply(
     reply.status = "sent"
     reply.sent_at = utcnow()
     conv.last_activity_at = utcnow()
+
+    # 工单合并: 老板回复成功即视为解决该会话未处理的高风险工单
+    # (the ticket's "must reply to resolve" discipline, enforced here instead
+    # of via a separate ticket page).
+    open_tickets = db.execute(
+        select(Ticket).where(
+            Ticket.conversation_id == conv.id,
+            Ticket.is_deleted.is_(False),
+            Ticket.status.in_(("pending", "in_progress")),
+        )
+    ).scalars().all()
+    for ticket in open_tickets:
+        ticket.status = "resolved"
+        ticket.resolved_at = utcnow()
+        log_action(
+            db,
+            "ticket_resolved",
+            "ticket",
+            ticket.id,
+            actor_id=user.id,
+            ip=_ip(request),
+            commit=False,
+        )
+
     log_action(
         db,
         "manual_reply_sent",
@@ -378,12 +422,16 @@ async def edit_reply(
         raise HTTPException(status_code=404, detail="NOT_FOUND")
     if reply.status not in ("draft", "pending_review"):
         raise HTTPException(status_code=409, detail="NOT_EDITABLE")
+    customer_name = None
+    conv = db.get(Conversation, reply.conversation_id)
+    if conv is not None:
+        customer_name = conv.customer.display_name
     if payload.content_cn is not None:
         reply.content_cn = payload.content_cn
         try:
             reply.content_en = TranslatorService(
                 build_llm_client(settings)
-            ).translate_to_english(payload.content_cn)
+            ).translate_to_letter(payload.content_cn, customer_name=customer_name)
         except LLMError:
             raise HTTPException(status_code=422, detail="LLM_FAILED") from None
     log_action(
@@ -424,10 +472,14 @@ async def send_draft(
     if _has_newer_release(db, reply):
         raise HTTPException(status_code=409, detail="SUPERSEDED")
     if not reply.content_en and reply.content_cn:
+        customer_name = None
+        conv = db.get(Conversation, reply.conversation_id)
+        if conv is not None:
+            customer_name = conv.customer.display_name
         try:
             reply.content_en = TranslatorService(
                 build_llm_client(settings)
-            ).translate_to_english(reply.content_cn)
+            ).translate_to_letter(reply.content_cn, customer_name=customer_name)
         except LLMError:
             raise HTTPException(status_code=422, detail="LLM_FAILED") from None
     if not reply.content_en:

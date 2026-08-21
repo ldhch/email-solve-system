@@ -104,6 +104,21 @@ def _conversation_rows(
         ).scalars()
     }
 
+    # Image attachment count per email, so each inbox row can show how many
+    # photos the thread carries (the "图×N" badge). Only image attachments
+    # count — the badge is about photos, not PDFs.
+    all_email_ids = [e.id for e_list in conv_emails.values() for e in e_list]
+    image_count_by_email = dict(
+        db.execute(
+            select(Attachment.email_id, func.count(Attachment.id))
+            .where(
+                Attachment.email_id.in_(all_email_ids),
+                Attachment.content_type.like("image/%"),
+            )
+            .group_by(Attachment.email_id)
+        ).all()
+    )
+
     rows: list[dict] = []
     for cid, e_list in conv_emails.items():
         conv = conversations[cid]
@@ -164,6 +179,10 @@ def _conversation_rows(
                 "from_email": latest_email.from_email,
                 "customer_name": customer.display_name if customer else None,
                 "email_count": len(e_list),
+                "has_attachments": any(e.has_attachments for e in e_list),
+                "attachment_count": sum(
+                    image_count_by_email.get(e.id, 0) for e in e_list
+                ),
                 "unread_count": unread,
                 "risk_level": risk,
                 "summary_cn": summary,

@@ -55,8 +55,8 @@ export function Layout({ children }: { children: ReactNode }) {
                   </span>
                 )}
               </NavLink>
-              <NavLink to="/tickets" className={linkCls}>
-                工单
+              <NavLink to="/templates" className={linkCls}>
+                快捷模板
               </NavLink>
               <NavLink to="/knowledge" className={linkCls}>
                 知识库

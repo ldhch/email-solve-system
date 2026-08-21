@@ -105,6 +105,23 @@ def seed(settings: Settings | None = None) -> None:
                         created_at=utcnow(),
                     )
                 )
+        # Quick reply templates: seed the defaults once, never overwrite edits.
+        from app.models.reply_template import (
+            DEFAULT_REPLY_TEMPLATES,
+            ReplyTemplate,
+        )
+        from sqlalchemy import func, select as _select
+
+        if db.scalar(_select(func.count(ReplyTemplate.id))) == 0:
+            for order, (name, content) in enumerate(DEFAULT_REPLY_TEMPLATES):
+                db.add(
+                    ReplyTemplate(
+                        name=name,
+                        content=content,
+                        sort_order=order,
+                        created_at=utcnow(),
+                    )
+                )
         db.commit()
 
 

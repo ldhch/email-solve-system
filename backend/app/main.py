@@ -17,6 +17,7 @@ from app.api.inbox import router as inbox_router
 from app.api.kb import router as kb_router
 from app.api.qa import router as qa_router
 from app.api.system import router as system_router
+from app.api.templates import router as templates_router
 from app.api.tickets import router as tickets_router
 from app.config import get_settings
 from app.core.logging import setup_logging
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
         conversations_router,
         emails_router,
         tickets_router,
+        templates_router,
         kb_router,
         qa_router,
     ):

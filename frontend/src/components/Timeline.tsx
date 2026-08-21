@@ -415,6 +415,127 @@ function EmailBodyView({ text }: { text: string }) {
   );
 }
 
+// ---- Email attachments ----
+// Customer emails often carry photos (damaged goods, order notes). The
+// conversation timeline already exposes them as `type: "attachment"` entries;
+// this renders each one: images as square thumbnails that open a lightbox on
+// click, everything else (PDF/zip/…) as a file chip linking to the download
+// endpoint. Thumbnails lazy-load so a thread with many images stays light.
+
+function fmtBytes(n: number | null | undefined): string {
+  if (!n) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function Lightbox({
+  src,
+  title,
+  onClose,
+}: {
+  src: string;
+  title?: string;
+  onClose: () => void;
+}) {
+  // Close on Esc as well as on backdrop click; the image itself stops the
+  // click so zoomed content can be inspected without losing it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-6"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={title ?? "附件大图"}
+    >
+      <div className="max-w-full" onClick={(e) => e.stopPropagation()}>
+        <img
+          src={src}
+          alt={title ?? "附件图片"}
+          className="max-h-[85vh] max-w-full rounded-lg object-contain"
+        />
+        {title && (
+          <div className="mt-2 truncate text-center text-[12px] text-white/80">
+            {title}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AttachmentThumb({ item }: { item: TimelineItem }) {
+  const [open, setOpen] = useState(false);
+  const id = item.attachment_id;
+  if (id == null) return null;
+  const src = `/api/v1/attachments/${id}`;
+  const isImage =
+    (item.content_type ?? "").startsWith("image/") ||
+    /\.(jpe?g|png|gif|webp|bmp|avif|svg)$/i.test(item.filename ?? "");
+  if (!isImage) {
+    return (
+      <a
+        href={src}
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-line bg-[#F7F9FB] px-2 py-1 text-[12px] text-sub transition-colors hover:text-ink"
+        title={`下载 ${item.filename}`}
+      >
+        <span>📄</span>
+        <span className="truncate">{item.filename}</span>
+        {item.size_bytes != null && (
+          <span className="shrink-0 tabular-nums">{fmtBytes(item.size_bytes)}</span>
+        )}
+      </a>
+    );
+  }
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-line bg-[#F1F3F5] transition-shadow hover:shadow-md"
+        title={`点击放大：${item.filename}`}
+      >
+        <img
+          src={src}
+          alt={item.filename ?? "附件图片"}
+          loading="lazy"
+          className="h-full w-full object-cover transition-transform group-hover:scale-105"
+        />
+      </button>
+      {open && (
+        <Lightbox src={src} title={item.filename} onClose={() => setOpen(false)} />
+      )}
+    </>
+  );
+}
+
+function AttachmentGrid({ items }: { items: TimelineItem[] }) {
+  const attachments = items.filter(
+    (it): it is TimelineItem & { attachment_id: number } =>
+      it.type === "attachment" && it.attachment_id != null,
+  );
+  if (attachments.length === 0) return null;
+  return (
+    <div className="mt-3">
+      <div className="mb-1.5 text-[11.5px] font-medium text-sub">附件</div>
+      <div className="flex flex-wrap items-start gap-2">
+        {attachments.map((a) => (
+          <AttachmentThumb key={a.attachment_id} item={a} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // Message block header: role badge + sender email + time, so the boss sees at a
 // glance who wrote what and when without reading the body.
 function MessageHeader({
@@ -597,6 +718,9 @@ export function Timeline({
   const id = latest.email_id!;
   const fullText = fullCn[id] ?? latest.content_cn ?? latest.content ?? "";
   const latestAt = formatLocal(latest.at ?? null);
+  // Attachments may belong to any email in the thread; show them all under the
+  // freshest customer email so the boss sees the photos without digging.
+  const attachments = items.filter((it) => it.type === "attachment");
 
   if (mode === "summary") {
     return (
@@ -612,6 +736,7 @@ export function Timeline({
             <div className="text-[16px] leading-normal whitespace-pre-wrap text-ink">
               {latest.summary_cn || freshPreview(latest.content)}
             </div>
+            <AttachmentGrid items={attachments} />
           </div>
         </li>
       </ol>
@@ -665,6 +790,7 @@ export function Timeline({
           ) : (
             <EmailBodyView text={latest.content ?? ""} />
           )}
+          <AttachmentGrid items={attachments} />
           {translating && !fullCn[id] && !latest.content_cn && (
             <p className="mt-1.5 text-[12px] text-sub">
               中文翻译生成中，先显示英文原文…

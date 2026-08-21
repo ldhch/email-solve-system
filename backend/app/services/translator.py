@@ -40,11 +40,35 @@ Simplified Chinese. Translate the FULL text faithfully.
 """
 
 
+# Manual replies must read like a proper support email (greeting, body,
+# closing, signature) just like AI-generated ones — the translation and the
+# letter formatting happen in one call. Keep the rules short (see the note on
+# TRANSLATE_CN_SYSTEM_PROMPT: long constrained prompts on deepseek-v4-flash
+# can trigger a runaway reasoning loop and return an empty translation).
+TRANSLATE_LETTER_SYSTEM_PROMPT = """\
+Translate the store owner's Chinese message into a complete English
+customer-support email in standard letter format:
+- Greeting: {greeting_rule}
+- The translated message as the body (light Markdown: **bold** for key points)
+- Closing: "Best regards,"
+- Signature: "The LBORA Team"
+Output only the email. Never use ">" quote markers, never copy quoted text,
+never add a preamble such as "Here is your reply".
+"""
+
+
 def _load_prompt() -> str:
     prompt_file = prompts_dir() / "translate_reply.md"
     if prompt_file.exists():
         return prompt_file.read_text(encoding="utf-8")
     return TRANSLATE_SYSTEM_PROMPT
+
+
+def _load_letter_prompt() -> str:
+    prompt_file = prompts_dir() / "translate_letter.md"
+    if prompt_file.exists():
+        return prompt_file.read_text(encoding="utf-8")
+    return TRANSLATE_LETTER_SYSTEM_PROMPT
 
 
 class TranslatorService:
@@ -62,6 +86,34 @@ class TranslatorService:
         return self.llm_client.chat_with_retry(
             messages=[{"role": "user", "content": text}],
             system_prompt=_load_prompt(),
+            temperature=0.2,
+        ).strip()
+
+    def translate_to_letter(
+        self, text: str, customer_name: str | None = None
+    ) -> str:
+        """Translate the boss's Chinese reply AND format it as a full letter.
+
+        Manual replies go through the same letter-format discipline as the
+        AI-generated ones (greeting, body, closing, "The LBORA Team" signature).
+        The greeting uses the customer's name when available, else "Hi there,".
+        Pure-English input passes through unchanged — the boss wrote it already.
+        """
+
+        if not text or not text.strip():
+            raise ValueError("Empty Chinese reply")
+        text = text.strip()
+        if not _CJK_RE.search(text):
+            return text
+        greeting_rule = (
+            f'Use "Dear {customer_name}," as the greeting.'
+            if customer_name
+            else 'Use "Hi there," as the greeting.'
+        )
+        prompt = _load_letter_prompt().format(greeting_rule=greeting_rule)
+        return self.llm_client.chat_with_retry(
+            messages=[{"role": "user", "content": text}],
+            system_prompt=prompt,
             temperature=0.2,
         ).strip()
 

@@ -7,7 +7,7 @@ import KnowledgeBase from "./pages/KnowledgeBase";
 import Login from "./pages/Login";
 import QAPairs from "./pages/QAPairs";
 import Settings from "./pages/Settings";
-import Tickets from "./pages/Tickets";
+import Templates from "./pages/Templates";
 
 export default function App() {
   return (
@@ -15,7 +15,7 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route element={<RequireAuth />}>
         <Route path="/inbox" element={<Inbox />} />
-        <Route path="/tickets" element={<Tickets />} />
+        <Route path="/templates" element={<Templates />} />
         <Route path="/knowledge" element={<KnowledgeBase />} />
         <Route path="/qa" element={<QAPairs />} />
         <Route path="/settings" element={<Settings />} />

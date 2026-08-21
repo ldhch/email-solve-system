@@ -40,8 +40,35 @@ EMAIL_FORMAT_RULE = (
     "Never invent a customer name. "
     "Format the body with light Markdown: use **bold** for key points, "
     "- for unordered list items, and blank lines between paragraphs. "
-    "Do not use heading levels, images, or tables."
+    "Do not use heading levels, images, or tables. "
+    'Never quote the customer\'s original message and never use ">" quote '
+    'markers. Do not add any meta-commentary or preamble (e.g. "Here is your '
+    'reply:").'
 )
+
+
+_QUOTE_LINE_RE = re.compile(r"^[>»›]")
+# Meta-commentary a model occasionally echoes around a reply ("好的，这是完整
+# 的回复：", "Here is your reply:") — strip it so only the letter remains.
+_PREAMBLE_RE = re.compile(
+    r"^(?:好的[，,]?这是(?:完整的)?(?:回复|邮件|内容)[:：]?\s*|"
+    r"Here(?:'s| is)[^\n]{0,24}?(?:reply|email|response)[:：]?\s*)",
+    re.IGNORECASE,
+)
+
+
+def sanitize_reply_text(text: str) -> str:
+    """Drop quoted-history markers and meta-commentary a model may have echoed.
+
+    Outbound replies must read as a clean letter: no ``>`` quoting of the
+    customer's message and no "Here is your reply:" preamble. Applied to every
+    reply (AI- or manual-generated) before it is persisted.
+    """
+
+    if not text:
+        return text
+    lines = [line for line in text.split("\n") if not _QUOTE_LINE_RE.match(line)]
+    return _PREAMBLE_RE.sub("", "\n".join(lines)).strip()
 
 
 def _inline_markdown_to_html(text: str) -> str:
@@ -365,6 +392,7 @@ class ReplierService:
         non-fatal: a failure leaves the reply English-only).
         """
 
+        content_en = sanitize_reply_text(content_en or "")
         if content_cn is None and content_en:
             content_cn = self._translate_cn(content_en)
         reply = Reply(

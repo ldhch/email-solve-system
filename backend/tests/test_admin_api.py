@@ -16,6 +16,9 @@ from app.models.reply import Reply
 from app.models.ticket import Ticket
 from app.services.audit import utcnow
 from app.services.mailer import MailerService
+from app.llm.client import MockLLMClient
+from app.services.replier import ReplierService, sanitize_reply_text
+from app.services.translator import TranslatorService
 
 from api_helpers import api, close_client, login, make_client, seed_owner
 from conftest import FakeSMTP
@@ -151,6 +154,46 @@ def test_inbox_list_and_detail(settings, session_factory) -> None:
         assert data["summary_cn"] == "中文摘要"
     finally:
         close_client(client)
+
+
+def test_inbox_has_attachments_flag(settings, session_factory) -> None:
+    ids = _seed_conversation(session_factory, emails=1)
+    with session_factory() as db:
+        email = db.get(Email, ids["email_ids"][0])
+        email.has_attachments = True
+        db.add(
+            Attachment(
+                email_id=email.id,
+                filename="photo.png",
+                content_type="image/png",
+                size_bytes=8,
+                stored_path="attachments/photo.png",
+                created_at=utcnow(),
+            )
+        )
+        db.commit()
+    client = _authed_client(settings, session_factory)
+    try:
+        # the inbox row exposes the paperclip flag + image count so the boss
+        # sees which conversations carry photos before opening them
+        listing = api(client, "GET", "/api/v1/inbox").json()["data"]["items"]
+        assert listing[0]["has_attachments"] is True
+        assert listing[0]["attachment_count"] == 1
+
+        # and the conversation timeline carries the attachment entry for the
+        # frontend to render thumbnails / download chips
+        data = api(
+            client, "GET", f"/api/v1/conversations/{ids['conversation_id']}"
+        ).json()["data"]
+        attachment_item = next(
+            t for t in data["timeline"] if t["type"] == "attachment"
+        )
+        assert attachment_item["attachment_id"] is not None
+        assert attachment_item["filename"] == "photo.png"
+        assert attachment_item["content_type"] == "image/png"
+    finally:
+        close_client(client)
+
 
 
 def test_inbox_unread_and_mark_read(settings, session_factory) -> None:
@@ -677,3 +720,130 @@ def test_attachment_download(settings, session_factory, tmp_path) -> None:
         assert resp.headers["content-type"] == "image/png"
     finally:
         close_client(client)
+
+
+# ---------- quick reply templates + ticket merge ----------
+
+
+def test_reply_templates_seed_and_crud(settings, session_factory) -> None:
+    client = _authed_client(settings, session_factory)
+    try:
+        # first GET seeds the four defaults
+        listing = api(client, "GET", "/api/v1/reply-templates")
+        assert listing.status_code == 200, listing.text
+        items = listing.json()["data"]["items"]
+        assert [t["name"] for t in items] == ["退货", "物流", "补偿", "通用"]
+        assert all(t["content"] for t in items)
+
+        # create
+        created = api(
+            client,
+            "POST",
+            "/api/v1/reply-templates",
+            json={"name": "发票", "content": "发票已通过邮件发送给您。"},
+        )
+        assert created.status_code == 200, created.text
+        new_id = created.json()["data"]["id"]
+
+        # update
+        updated = api(
+            client,
+            "PATCH",
+            f"/api/v1/reply-templates/{new_id}",
+            json={"name": "发票重发", "content": "我们重新给您发送发票，请查收。"},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["data"]["name"] == "发票重发"
+
+        # delete
+        deleted = api(client, "DELETE", f"/api/v1/reply-templates/{new_id}")
+        assert deleted.status_code == 200
+        after = api(client, "GET", "/api/v1/reply-templates").json()["data"]["items"]
+        assert all(t["id"] != new_id for t in after)
+    finally:
+        close_client(client)
+
+
+def test_conversation_detail_includes_open_tickets(settings, session_factory) -> None:
+    ids = _seed_conversation(session_factory, ticket={"status": "pending"})
+    client = _authed_client(settings, session_factory)
+    try:
+        resp = api(client, "GET", f"/api/v1/conversations/{ids['conversation_id']}")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert len(data["open_tickets"]) == 1
+        assert data["open_tickets"][0]["status"] == "pending"
+        assert data["open_tickets"][0]["sla_deadline"] is not None
+        assert data["resolved_ticket_count"] == 0
+    finally:
+        close_client(client)
+
+
+def test_manual_reply_auto_resolves_open_ticket(
+    settings, session_factory, monkeypatch
+) -> None:
+    ids = _seed_conversation(
+        session_factory,
+        emails=1,
+        ticket={"status": "pending"},
+    )
+    monkeypatch.setattr(
+        conversations_module,
+        "_make_mailer",
+        lambda db, s: MailerService(db, s, smtp_class=FakeSMTP),
+    )
+    client = _authed_client(settings, session_factory)
+    try:
+        resp = api(
+            client,
+            "POST",
+            f"/api/v1/conversations/{ids['conversation_id']}/reply",
+            json={"content_cn": "非常抱歉，我们马上为您处理。"},
+        )
+        assert resp.status_code == 200, resp.text
+        with session_factory() as db:
+            ticket = db.get(Ticket, ids["ticket_id"])
+            assert ticket.status == "resolved"
+            assert ticket.resolved_at is not None
+            actions = {a.action for a in db.query(AuditLog).all()}
+        assert "ticket_resolved" in actions
+    finally:
+        close_client(client)
+
+
+# ---------- reply letter format (sanitize + translate-to-letter) ----------
+
+
+def test_sanitize_reply_text_strips_quotes_and_preamble() -> None:
+    text = "Here is your reply:\n> > quoted\nPlease send order #1."
+    assert sanitize_reply_text(text) == "Please send order #1."
+
+    cn = "好的，这是完整的回复：\n请提供订单号。"
+    assert sanitize_reply_text(cn) == "请提供订单号。"
+
+    # a clean letter must pass through untouched
+    normal = "Dear John,\nWe have processed your refund."
+    assert sanitize_reply_text(normal) == normal
+
+
+def test_translate_to_letter_passthrough_and_mock(settings) -> None:
+    service = TranslatorService(MockLLMClient(settings))
+    # no CJK -> pass through unchanged (boss already wrote English)
+    assert service.translate_to_letter("Thanks for your help.") == "Thanks for your help."
+    # CJK -> mock "translates" through the normal client path
+    out = service.translate_to_letter("请提供订单号", customer_name="John")
+    assert out.startswith("(Mock translation)")
+
+
+def test_build_reply_sanitizes_content_en(settings, session_factory) -> None:
+    ids = _seed_conversation(session_factory, emails=1)
+    with session_factory() as db:
+        conv = db.get(Conversation, ids["conversation_id"])
+        email = db.get(Email, ids["email_ids"][0])
+        reply = ReplierService(db, settings, MockLLMClient(settings)).build_reply(
+            email,
+            conv,
+            "Here is your reply:\n> > quoted\nDear John,\nPlease provide order #1.",
+        )
+        db.commit()
+        assert reply.content_en == "Dear John,\nPlease provide order #1."
