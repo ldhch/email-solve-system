@@ -63,6 +63,10 @@ export function errorText(err: unknown): string {
       return "不能合并到当前会话自身";
     case "DIFFERENT_CUSTOMER":
       return "两个会话不是同一客户，无法合并";
+    case "EMPTY_WHITELIST":
+      return "开启测试模式需要至少一个白名单发件人";
+    case "INVALID_EMAIL":
+      return "白名单中存在无效邮箱格式";
     case "NOT_FOUND":
       return "资源不存在";
     default:

@@ -6,6 +6,7 @@ Phase 2: pause/resume are guarded by the JWT owner session (httpOnly cookie).
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime
 
@@ -19,7 +20,12 @@ from app.config import Settings
 from app.db.session import get_db
 from app.models.user import User
 from app.models.system_state import SystemState
-from app.schemas.system import HealthzResponse, PauseRequest, SystemStatusResponse
+from app.schemas.system import (
+    HealthzResponse,
+    PauseRequest,
+    SystemStatusResponse,
+    TestModeRequest,
+)
 from app.services.audit import log_action, utcnow
 from app.services import scheduler as scheduler_module
 
@@ -27,9 +33,22 @@ router = APIRouter(prefix="/api/v1", tags=["system"])
 
 _STARTED_AT = time.time()
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 
 def _fmt(dt: datetime | None) -> str | None:
     return dt.isoformat(timespec="seconds") + "Z" if dt else None
+
+
+def _test_mode_state(state: SystemState | None) -> dict:
+    """Serialize the test-mode switch + whitelist for the Settings page."""
+
+    return {
+        "test_mode": bool(state and state.test_mode),
+        "test_whitelist": [
+            w for w in (state.test_whitelist if state else "").split(",") if w
+        ],
+    }
 
 
 @router.get("/healthz", response_model=HealthzResponse)
@@ -67,7 +86,47 @@ async def system_status(db: Session = Depends(get_db)) -> dict:
         paused_at=_fmt(state.paused_at if state else None),
         paused_reason=state.paused_reason if state else None,
         uptime_sec=int(time.time() - _STARTED_AT),
+        **_test_mode_state(state),
     ).model_dump())
+
+
+@router.put("/system/test-mode")
+async def system_test_mode(
+    payload: TestModeRequest,
+    request: Request,
+    user: User = Depends(require_owner),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Toggle test mode and persist the sender whitelist (owner only).
+
+    Test mode means the pipeline only ingests / replies / translates mail from
+    whitelisted senders; every other UNSEEN message is left untouched on the
+    server. An empty whitelist is rejected while enabling so the boss can never
+    switch it on believing a sender is covered when none is.
+    """
+
+    cleaned = [e.strip().lower() for e in payload.whitelist if e.strip()]
+    if payload.enabled and not cleaned:
+        raise HTTPException(status_code=400, detail="EMPTY_WHITELIST")
+    for email in cleaned:
+        if not _EMAIL_RE.match(email):
+            raise HTTPException(status_code=400, detail="INVALID_EMAIL")
+
+    state = db.get(SystemState, 1)
+    if state is None:
+        raise HTTPException(status_code=500, detail="INTERNAL")
+    state.test_mode = payload.enabled
+    state.test_whitelist = ",".join(dict.fromkeys(cleaned))  # dedupe, keep order
+    log_action(
+        db,
+        "test_mode_changed",
+        "system",
+        state.id,
+        actor_id=user.id,
+        ip=request.client.host if request.client else None,
+    )
+    db.commit()
+    return ok(_test_mode_state(state))
 
 
 @router.get("/system/notifications")

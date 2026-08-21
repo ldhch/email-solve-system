@@ -14,6 +14,15 @@ class SystemStatusResponse(BaseModel):
     paused_at: str | None = None
     paused_reason: str | None = None
     uptime_sec: int
+    test_mode: bool = False
+    test_whitelist: list[str] = []
+
+
+class TestModeRequest(BaseModel):
+    """Test-mode switch: only whitelisted senders are auto-processed."""
+
+    enabled: bool
+    whitelist: list[str] = []
 
 
 class HealthzResponse(BaseModel):

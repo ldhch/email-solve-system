@@ -416,6 +416,35 @@ class IngestService:
         except Exception as exc:  # noqa: BLE001 - non-fatal
             logger.warning("Failed to mark uid=%s seen: %s", uid, exc)
 
+    # ---------- test mode (sender whitelist) ----------
+
+    def _test_mode_gate(self) -> set[str] | None:
+        """Return the effective whitelist when test mode is on, else None.
+
+        ``None`` means test mode is off — every sender is processed. An empty
+        set means test mode is on with an empty whitelist — every sender is
+        gated (full isolation). A non-empty set is the exact set of sender
+        addresses allowed through, normalized to lowercase.
+        """
+
+        state = self.db.get(SystemState, 1)
+        if state is None or not state.test_mode:
+            return None
+        return {
+            w.strip().lower()
+            for w in (state.test_whitelist or "").split(",")
+            if w.strip()
+        }
+
+    def _is_gated(self, gate: set[str] | None, from_email: str) -> bool:
+        """True when ``from_email`` must be skipped under test mode.
+
+        Gated mail is NOT ingested, classified, translated or replied to, and
+        it stays UNSEEN on the server so a later non-test poll picks it up.
+        """
+
+        return gate is not None and from_email.lower() not in gate
+
     # ---------- pipeline ----------
 
     def process_one(
@@ -1116,11 +1145,13 @@ class IngestService:
                 "silenced",
                 "failed",
                 "followup",
+                "test_skipped",
             )
         }
         state = self.db.get(SystemState, 1)
         if state is not None and state.ai_paused:
             return summary
+        gate = self._test_mode_gate()
         pending = self.db.execute(
             select(Email)
             .where(Email.pending_after_pause.is_(True))
@@ -1131,6 +1162,10 @@ class IngestService:
         logger.info("Resuming %s paused email(s) in received order", len(pending))
         pending_groups: dict[int, list[ProcessingResult]] = {}
         for email in pending:
+            if self._is_gated(gate, email.from_email):
+                # Test mode: keep the mail queued untouched until it is off.
+                summary["test_skipped"] += 1
+                continue
             conversation = self.db.get(Conversation, email.conversation_id)
             if conversation is None:
                 email.pending_after_pause = False  # orphaned row: drop the flag
@@ -1414,6 +1449,7 @@ class IngestService:
                 "ad": 0,
                 "failed": 0,
                 "followup": 0,
+                "test_skipped": 0,
             }
             # Backlog first: emails ingested while paused are re-routed in
             # received order, then fresh UNSEEN mail is processed (M-19).
@@ -1422,6 +1458,7 @@ class IngestService:
                 summary[key] += value
             items = self.fetch_unseen(conn)
             summary["fetched"] = len(items)
+            gate = self._test_mode_gate()
             pending_groups: dict[int, list[ProcessingResult]] = {}
             for uid, raw in items:
                 try:
@@ -1431,6 +1468,11 @@ class IngestService:
                     log_action(self.db, "parse_failed", "email", 0, ip=None)
                     self.mark_seen(conn, uid)
                     summary["failed"] += 1
+                    continue
+                if self._is_gated(gate, parsed.from_email):
+                    # Test mode: the mail stays UNSEEN and untouched; it will be
+                    # re-fetched (and skipped again) until test mode is off.
+                    summary["test_skipped"] += 1
                     continue
                 result = self.process_one(parsed, auto_send_mode="defer")
                 if result.action == "pending_auto":

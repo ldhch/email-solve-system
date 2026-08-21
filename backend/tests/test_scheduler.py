@@ -13,6 +13,7 @@ from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.email import Email
 from app.models.reply import Reply
+from app.models.system_state import SystemState
 from app.models.ticket import Ticket
 from app.services.audit import utcnow
 from app.services.scheduler import (
@@ -472,3 +473,60 @@ def test_prefill_skips_empty_body(
     db.expire_all()
     assert db.get(Email, empty.id).content_cn is None
     assert db.get(Email, normal.id).content_cn is not None
+
+
+def test_prefill_respects_test_mode_whitelist(
+    db, session_factory, settings, monkeypatch
+) -> None:
+    """Test mode: prefill only translates whitelisted senders."""
+    import app.services.scheduler as scheduler_mod
+
+    state = db.get(SystemState, 1)
+    state.test_mode = True
+    state.test_whitelist = "c@example.com"
+    db.commit()
+
+    customer = Customer(email="c@example.com", display_name="C", created_at=utcnow())
+    db.add(customer)
+    db.flush()
+    allowed = _inbound_email(db, customer.id, "Where is my order? #1")
+    blocked = _inbound_email(db, customer.id, "Another question #2")
+    blocked.from_email = "d@example.com"
+    db.commit()
+
+    monkeypatch.setattr(
+        scheduler_mod, "build_llm_client", lambda s: MockLLMClient(s)
+    )
+    service = SchedulerService(settings, session_factory=session_factory)
+    service._job_prefill_translations()
+
+    db.expire_all()
+    assert db.get(Email, allowed.id).content_cn is not None
+    assert db.get(Email, blocked.id).content_cn is None
+
+
+def test_prefill_test_mode_empty_whitelist_translates_nothing(
+    db, session_factory, settings, monkeypatch
+) -> None:
+    """Test mode with an empty whitelist must not spend LLM tokens at all."""
+    import app.services.scheduler as scheduler_mod
+
+    state = db.get(SystemState, 1)
+    state.test_mode = True
+    state.test_whitelist = ""
+    db.commit()
+
+    customer = Customer(email="c@example.com", display_name="C", created_at=utcnow())
+    db.add(customer)
+    db.flush()
+    email = _inbound_email(db, customer.id, "Please help.")
+    db.commit()
+
+    monkeypatch.setattr(
+        scheduler_mod, "build_llm_client", lambda s: MockLLMClient(s)
+    )
+    service = SchedulerService(settings, session_factory=session_factory)
+    service._job_prefill_translations()
+
+    db.expire_all()
+    assert db.get(Email, email.id).content_cn is None

@@ -29,6 +29,7 @@ from app.llm.client import build_llm_client
 from app.models.conversation import Conversation
 from app.models.email import Email
 from app.models.reply import Reply
+from app.models.system_state import SystemState
 from app.models.ticket import Ticket
 from app.services.alerting import AlertingService
 from app.services.audit import log_action, utcnow
@@ -175,7 +176,7 @@ class SchedulerService:
 
         factory = self._factory()
         with factory() as db:
-            pending = db.execute(
+            q = (
                 select(Email)
                 .where(
                     Email.is_inbound.is_(True),
@@ -183,7 +184,21 @@ class SchedulerService:
                     Email.body_text.isnot(None),
                 )
                 .order_by(Email.received_at.asc())
-                .limit(self.settings.translation_prefill_batch_size)
+            )
+            state = db.get(SystemState, 1)
+            if state is not None and state.test_mode:
+                # Test mode: prefill only whitelisted senders, so no LLM tokens
+                # are spent on backlog mail the boss is deliberately ignoring.
+                whitelist = {
+                    w.strip().lower()
+                    for w in (state.test_whitelist or "").split(",")
+                    if w.strip()
+                }
+                if not whitelist:
+                    return  # test mode with no sender whitelisted: nothing to prefill
+                q = q.where(Email.from_email.in_(whitelist))
+            pending = db.execute(
+                q.limit(self.settings.translation_prefill_batch_size)
             ).scalars().all()
         jobs: list[tuple[int, str]] = [
             (email.id, (email.body_text or "").strip())

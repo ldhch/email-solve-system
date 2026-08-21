@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 
 import json
@@ -12,8 +12,11 @@ from sqlalchemy import select
 from app.llm.client import MockLLMClient
 from app.models.attachment import Attachment
 from app.models.blocked_sender import BlockedSender
+from app.models.conversation import Conversation
+from app.models.customer import Customer
 from app.models.email import Email
 from app.models.reply import Reply
+from app.models.system_state import SystemState
 from app.services.ingest import IngestService, _html_to_text, parse_email
 from app.services.audit import utcnow
 from app.services.mailer import MailerService
@@ -272,3 +275,119 @@ def test_process_one_empty_body_stays_manual(db, settings) -> None:
     assert result.action == "manual"
     assert result.risk_level == "unknown"
     assert db.execute(select(Reply)).scalars().all() == []
+
+
+# ---------- 测试模式 (test mode / sender whitelist) ----------
+
+
+def _enable_test_mode(db, whitelist: str) -> None:
+    state = db.get(SystemState, 1)
+    state.test_mode = True
+    state.test_whitelist = whitelist
+    db.commit()
+
+
+def test_fetch_test_mode_gates_non_whitelisted_sender(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    """Test mode: non-whitelisted senders stay UNSEEN and are not ingested."""
+    _enable_test_mode(db, "test-a@example.com")
+    raw_a = make_raw_email(
+        subject="Order question",
+        body="Where is my hat?",
+        from_email="test-a@example.com",
+        message_id="<gate-a@example.com>",
+    )
+    raw_b = make_raw_email(
+        subject="Another one",
+        body="Please help me.",
+        from_email="test-b@example.com",
+        message_id="<gate-b@example.com>",
+    )
+    imap = fake_imap([("1", raw_a), ("2", raw_b)])
+    service = IngestService(
+        db,
+        settings,
+        llm_client=MockLLMClient(settings),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    summary = service.fetch_and_process()
+    assert summary["fetched"] == 2
+    assert summary["test_skipped"] == 1
+    emails = db.execute(select(Email)).scalars().all()
+    assert [e.message_id for e in emails] == ["gate-a@example.com"]
+    assert "1" in imap.seen      # whitelisted sender processed -> marked seen
+    assert "2" not in imap.seen  # gated mail stays UNSEEN
+
+
+def test_fetch_test_mode_empty_whitelist_isolates_everything(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    """Test mode with an empty whitelist gates every sender (full isolation)."""
+    _enable_test_mode(db, "")
+    imap = fake_imap(
+        [
+            (
+                "1",
+                make_raw_email(
+                    from_email="test-a@example.com", message_id="<gate-c@example.com>"
+                ),
+            ),
+            (
+                "2",
+                make_raw_email(
+                    from_email="test-b@example.com", message_id="<gate-d@example.com>"
+                ),
+            ),
+        ]
+    )
+    service = IngestService(
+        db,
+        settings,
+        llm_client=MockLLMClient(settings),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    summary = service.fetch_and_process()
+    assert summary["test_skipped"] == 2
+    assert db.execute(select(Email)).scalars().all() == []
+    assert imap.seen == []
+
+
+def test_pending_backlog_respects_test_mode(db, settings, fake_smtp_class) -> None:
+    """Mail queued from an emergency pause stays queued when the sender is gated."""
+    _enable_test_mode(db, "test-a@example.com")
+    customer = Customer(email="test-b@example.com", display_name="B", created_at=utcnow())
+    db.add(customer)
+    db.flush()
+    conv = Conversation(
+        customer_id=customer.id,
+        subject_normalized="re: x",
+        window_end=utcnow() + timedelta(days=7),
+        last_activity_at=utcnow(),
+        status="open",
+    )
+    db.add(conv)
+    db.flush()
+    email = Email(
+        conversation_id=conv.id,
+        message_id="<pend-b@example.com>",
+        subject="Re: help",
+        from_email="test-b@example.com",
+        is_inbound=True,
+        pending_after_pause=True,
+        received_at=utcnow(),
+    )
+    db.add(email)
+    db.commit()
+    service = IngestService(
+        db,
+        settings,
+        llm_client=MockLLMClient(settings),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+    )
+    summary = service._process_pending_after_pause()
+    assert summary["test_skipped"] == 1
+    db.expire_all()
+    assert db.get(Email, email.id).pending_after_pause is True  # stays queued

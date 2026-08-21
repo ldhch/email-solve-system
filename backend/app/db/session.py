@@ -202,6 +202,27 @@ def _ensure_reply_low_confidence_column(engine: Engine) -> None:
             )
 
 
+def _ensure_system_state_test_columns(engine: Engine) -> None:
+    """Add ``system_state.test_mode`` / ``test_whitelist`` to existing DBs."""
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(system_state)"))}
+        if "test_mode" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE system_state "
+                    "ADD COLUMN test_mode BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
+        if "test_whitelist" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE system_state "
+                    "ADD COLUMN test_whitelist VARCHAR(2048) NOT NULL DEFAULT ''"
+                )
+            )
+
+
 def init_db(settings: Settings | None = None) -> None:
     """Create all tables (create_all) and seed defaults. No migrations."""
 
@@ -218,6 +239,7 @@ def init_db(settings: Settings | None = None) -> None:
     _ensure_email_content_cn_column(engine)
     _ensure_email_is_ad_column(engine)
     _ensure_reply_low_confidence_column(engine)
+    _ensure_system_state_test_columns(engine)
     seed(settings)
 
 

@@ -8,6 +8,8 @@ interface SystemStatus {
   paused_at: string | null;
   paused_reason: string | null;
   uptime_sec: number;
+  test_mode: boolean;
+  test_whitelist: string[];
 }
 
 interface NotificationStatus {
@@ -36,6 +38,8 @@ export default function Settings() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [busy, setBusy] = useState(false);
+  const [testMode, setTestMode] = useState(false);
+  const [whitelistText, setWhitelistText] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -53,6 +57,32 @@ export default function Settings() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Keep the test-mode editor in sync with the server once status loads.
+  useEffect(() => {
+    if (!status) return;
+    setTestMode(status.test_mode);
+    setWhitelistText(status.test_whitelist.join("\n"));
+  }, [status]);
+
+  async function saveTestMode() {
+    setBusy(true);
+    setError("");
+    setSuccess("");
+    try {
+      const whitelist = whitelistText
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      await http.put("/system/test-mode", { enabled: testMode, whitelist });
+      setSuccess(testMode ? "已开启测试模式" : "已关闭测试模式");
+      await load();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function setMode(mode: "running" | "paused") {
     if (!status) return;
@@ -185,6 +215,70 @@ export default function Settings() {
           </details>
         </section>
       </div>
+
+      <section className="bg-white rounded-lg border border-gray-200 p-4 mt-4">
+        <h2 className="font-semibold mb-3">测试模式（发件人白名单）</h2>
+        <p className="text-sm text-gray-600 mb-4">
+          开启后系统只自动处理白名单中的发件人；其余未读邮件保持原样（不拉取入库、不回复、不翻译），关闭后恢复正常处理。
+        </p>
+
+        <div className="flex rounded-lg border border-gray-300 overflow-hidden w-72">
+          <button
+            type="button"
+            onClick={() => setTestMode(false)}
+            disabled={busy}
+            className={`flex-1 py-2 text-sm font-medium transition-colors disabled:opacity-50 ${
+              !testMode
+                ? "bg-blue-600 text-white"
+                : "bg-white text-gray-600 hover:bg-blue-50"
+            }`}
+          >
+            正式运行
+          </button>
+          <button
+            type="button"
+            onClick={() => setTestMode(true)}
+            disabled={busy}
+            className={`flex-1 py-2 text-sm font-medium transition-colors border-l border-gray-300 disabled:opacity-50 ${
+              testMode
+                ? "bg-blue-600 text-white"
+                : "bg-white text-gray-600 hover:bg-blue-50"
+            }`}
+          >
+            测试模式
+          </button>
+        </div>
+
+        <label className="block mt-4 mb-1 text-sm text-gray-600">
+          白名单发件人（每行或逗号分隔一个邮箱）
+        </label>
+        <textarea
+          value={whitelistText}
+          onChange={(e) => setWhitelistText(e.target.value)}
+          rows={4}
+          placeholder={"419018463@qq.com"}
+          className="w-full border border-gray-300 rounded text-sm p-2 font-mono"
+        />
+
+        <div className="flex items-center justify-between mt-3">
+          <p className="text-xs text-gray-500">
+            当前状态：
+            {testMode ? (
+              <span className="text-orange-600 font-medium">测试模式</span>
+            ) : (
+              <span className="text-green-600 font-medium">正式运行</span>
+            )}
+          </p>
+          <button
+            type="button"
+            onClick={saveTestMode}
+            disabled={busy}
+            className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50"
+          >
+            保存测试模式设置
+          </button>
+        </div>
+      </section>
 
       <section className="bg-white rounded-lg border border-gray-200 p-4 mt-4">
         <h2 className="font-semibold mb-2">审计日志</h2>

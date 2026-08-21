@@ -163,3 +163,121 @@ def test_pause_writes_audit_logs_with_actor(settings, session_factory) -> None:
         assert pause_actors == [owner.id]
     finally:
         close_client(client)
+
+
+# ---------- 测试模式 (test mode / sender whitelist) ----------
+
+
+def test_test_mode_default_off(settings, session_factory) -> None:
+    client = make_client(settings, session_factory)
+    try:
+        resp = api(client, "GET", "/api/v1/system/status")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["test_mode"] is False
+        assert data["test_whitelist"] == []
+    finally:
+        close_client(client)
+
+
+def test_test_mode_requires_login(settings, session_factory) -> None:
+    client = make_client(settings, session_factory)
+    try:
+        resp = api(
+            client,
+            "PUT",
+            "/api/v1/system/test-mode",
+            json={"enabled": True, "whitelist": ["a@example.com"]},
+        )
+        assert resp.status_code == 401
+    finally:
+        close_client(client)
+
+
+def test_test_mode_toggle_and_persist(settings, session_factory) -> None:
+    seed_owner(session_factory, settings.owner_username, settings.owner_password)
+    client = make_client(settings, session_factory)
+    try:
+        assert login(client, settings.owner_username, settings.owner_password).status_code == 200
+        resp = api(
+            client,
+            "PUT",
+            "/api/v1/system/test-mode",
+            json={
+                "enabled": True,
+                "whitelist": ["419018463@qq.com", "  Test-B@example.com "],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["test_mode"] is True
+        assert data["test_whitelist"] == ["419018463@qq.com", "test-b@example.com"]
+
+        status = api(client, "GET", "/api/v1/system/status").json()["data"]
+        assert status["test_mode"] is True
+        assert status["test_whitelist"] == ["419018463@qq.com", "test-b@example.com"]
+
+        off = api(
+            client,
+            "PUT",
+            "/api/v1/system/test-mode",
+            json={"enabled": False, "whitelist": []},
+        )
+        assert off.json()["data"]["test_mode"] is False
+        after = api(client, "GET", "/api/v1/system/status").json()["data"]
+        assert after["test_mode"] is False
+        assert after["test_whitelist"] == []
+    finally:
+        close_client(client)
+
+
+def test_test_mode_requires_whitelist_when_enabling(settings, session_factory) -> None:
+    seed_owner(session_factory, settings.owner_username, settings.owner_password)
+    client = make_client(settings, session_factory)
+    try:
+        login(client, settings.owner_username, settings.owner_password)
+        resp = api(
+            client,
+            "PUT",
+            "/api/v1/system/test-mode",
+            json={"enabled": True, "whitelist": []},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "EMPTY_WHITELIST"
+    finally:
+        close_client(client)
+
+
+def test_test_mode_rejects_invalid_email(settings, session_factory) -> None:
+    seed_owner(session_factory, settings.owner_username, settings.owner_password)
+    client = make_client(settings, session_factory)
+    try:
+        login(client, settings.owner_username, settings.owner_password)
+        resp = api(
+            client,
+            "PUT",
+            "/api/v1/system/test-mode",
+            json={"enabled": True, "whitelist": ["not-an-email"]},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "INVALID_EMAIL"
+    finally:
+        close_client(client)
+
+
+def test_test_mode_writes_audit_log(settings, session_factory) -> None:
+    seed_owner(session_factory, settings.owner_username, settings.owner_password)
+    client = make_client(settings, session_factory)
+    try:
+        login(client, settings.owner_username, settings.owner_password)
+        api(
+            client,
+            "PUT",
+            "/api/v1/system/test-mode",
+            json={"enabled": True, "whitelist": ["a@example.com"]},
+        )
+        with session_factory() as db:
+            actions = {a.action for a in db.query(AuditLog).all()}
+        assert "test_mode_changed" in actions
+    finally:
+        close_client(client)
