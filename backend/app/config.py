@@ -107,8 +107,10 @@ class Settings(BaseSettings):
     # Background EN->ZH full-text translation prefill: inbound emails get a
     # cached Chinese letter in the scheduler so the boss opens an already
     # translated thread instead of waiting on a synchronous LLM call. Batch
-    # size bounds how much wall-clock each round spends (serial timer, no queue).
+    # size bounds how many emails each round takes; the translation calls run
+    # concurrently (reasoning model, 16-125s each) but persist serially.
     translation_prefill_batch_size: int = 3
+    translation_prefill_concurrency: int = 3
     poll_interval_seconds: int = 90
     # Optional return-handling instructions appended to "release" replies.
     # Empty => the reply asks the customer for their order number first

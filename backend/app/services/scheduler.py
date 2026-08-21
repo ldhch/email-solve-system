@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -165,11 +166,15 @@ class SchedulerService:
         unread mail is backfilled over a few rounds; when nothing is pending
         the query is a fast empty scan. A single failure must not stall the
         rest of the batch, and never kills the timer.
+
+        The LLM calls run concurrently (each blocks 16-125s on the reasoning
+        model, and the OpenAI client is thread-safe), but results are persisted
+        serially by this thread so SQLite never sees concurrent writers.
+        Workers only call the translator and never touch a DB session.
         """
 
         factory = self._factory()
         with factory() as db:
-            translator = TranslatorService(build_llm_client(self.settings))
             pending = db.execute(
                 select(Email)
                 .where(
@@ -180,22 +185,48 @@ class SchedulerService:
                 .order_by(Email.received_at.asc())
                 .limit(self.settings.translation_prefill_batch_size)
             ).scalars().all()
-            translated = 0
-            for email in pending:
-                body = (email.body_text or "").strip()
-                if not body:
+        jobs: list[tuple[int, str]] = [
+            (email.id, (email.body_text or "").strip())
+            for email in pending
+            if (email.body_text or "").strip()
+        ]
+        if not jobs:
+            return
+        translator = TranslatorService(build_llm_client(self.settings))
+        workers = min(self.settings.translation_prefill_concurrency, len(jobs))
+        results: dict[int, str] = {}
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="prefill"
+        ) as pool:
+            futures = {
+                pool.submit(translator.translate_to_chinese, body): email_id
+                for email_id, body in jobs
+            }
+            for fut in as_completed(futures):
+                email_id = futures[fut]
+                try:
+                    results[email_id] = fut.result()
+                except Exception as exc:  # noqa: BLE001 - one mail must not block the batch
+                    logger.warning(
+                        "Prefill translation failed for email=%s: %s", email_id, exc
+                    )
+        translated = 0
+        for email_id, content_cn in results.items():
+            with factory() as db:
+                email = db.get(Email, email_id)
+                if email is None:
                     continue
                 try:
-                    email.content_cn = translator.translate_to_chinese(body)
+                    email.content_cn = content_cn
                     db.commit()
                     translated += 1
                 except Exception as exc:  # noqa: BLE001 - one mail must not block the batch
                     db.rollback()
                     logger.warning(
-                        "Prefill translation failed for email=%s: %s", email.id, exc
+                        "Prefill persist failed for email=%s: %s", email_id, exc
                     )
-            if translated:
-                logger.info("Prefilled %s translation(s)", translated)
+        if translated:
+            logger.info("Prefilled %s translation(s)", translated)
 
     # ---------- job 2: auto-close stale sessions ----------
 

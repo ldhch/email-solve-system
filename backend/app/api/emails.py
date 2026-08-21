@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/v1", tags=["emails"])
 
 
 @router.post("/emails/{email_id}/translate")
-async def translate_email_full(
+def translate_email_full(
     email_id: int,
     user=Depends(require_owner),
     db: Session = Depends(get_db),
@@ -28,6 +28,11 @@ async def translate_email_full(
 
     Idempotent: an already-stored translation is returned as-is, so the boss
     only pays for each email's translation once.
+
+    Sync ``def`` on purpose: the LLM call blocks the thread, and FastAPI runs
+    sync endpoints in the worker pool. An ``async def`` here would block the
+    whole event loop (freezing every other request) for the translation's
+    20-90s.
     """
 
     email = db.get(Email, email_id)
@@ -45,3 +50,25 @@ async def translate_email_full(
             raise HTTPException(status_code=422, detail="LLM_FAILED") from None
         db.commit()
     return ok({"email_id": email_id, "content_cn": email.content_cn})
+
+
+@router.get("/emails/{email_id}/translate/status")
+def translate_status(
+    email_id: int,
+    user=Depends(require_owner),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Read-only status of the full-text translation for one email.
+
+    ``done`` means ``content_cn`` is cached and ready to display; ``pending``
+    means the on-demand call or the background prefill is still translating.
+    The frontend polls this while a translation is in flight, so the Chinese
+    appears automatically once the backend finishes (no manual reopen).
+    """
+
+    email = db.get(Email, email_id)
+    if email is None:
+        raise HTTPException(status_code=404, detail="NOT_FOUND")
+    if email.content_cn:
+        return ok({"status": "done", "content_cn": email.content_cn})
+    return ok({"status": "pending", "content_cn": None})

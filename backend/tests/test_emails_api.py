@@ -92,3 +92,35 @@ def test_conversation_detail_includes_email_content_cn(settings, session_factory
         assert mail["content_cn"]
     finally:
         close_client(client)
+
+
+def test_translate_status_pending_then_done(settings, session_factory) -> None:
+    client = _authed_client(settings, session_factory)
+    try:
+        email_id = _seed_email(session_factory)
+        # before translation: pending, no content
+        r1 = api(client, "GET", f"/api/v1/emails/{email_id}/translate/status")
+        assert r1.status_code == 200, r1.text
+        d1 = r1.json()["data"]
+        assert d1["status"] == "pending"
+        assert d1["content_cn"] is None
+        # after translation: done with the cached Chinese
+        api(client, "POST", f"/api/v1/emails/{email_id}/translate")
+        r2 = api(client, "GET", f"/api/v1/emails/{email_id}/translate/status")
+        assert r2.status_code == 200, r2.text
+        d2 = r2.json()["data"]
+        assert d2["status"] == "done"
+        assert d2["content_cn"]
+    finally:
+        close_client(client)
+
+
+def test_translate_status_missing(settings, session_factory) -> None:
+    client = _authed_client(settings, session_factory)
+    try:
+        assert (
+            api(client, "GET", "/api/v1/emails/9999/translate/status").status_code
+            == 404
+        )
+    finally:
+        close_client(client)

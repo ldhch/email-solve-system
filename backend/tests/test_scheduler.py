@@ -360,3 +360,115 @@ def test_fetch_mail_job_invokes_ingest(settings, monkeypatch) -> None:
     service = SchedulerService(settings, session_factory=FakeFactory())
     service._job_fetch_mail()
     assert len(calls) == 1
+
+
+# ---------- full-text translation prefill (concurrent) ----------
+
+
+import itertools
+
+_message_seq = itertools.count(1)
+
+
+def _inbound_email(db, customer_id: int, body: str) -> Email:
+    """Seed one inbound email inside its own conversation."""
+    conv = Conversation(
+        customer_id=customer_id,
+        subject_normalized="Re: test",
+        window_end=utcnow() + timedelta(days=7),
+        last_activity_at=utcnow(),
+        status="open",
+    )
+    db.add(conv)
+    db.flush()
+    email = Email(
+        conversation_id=conv.id,
+        message_id=f"<prefill-{next(_message_seq)}>",
+        subject="Re: test",
+        from_email="c@example.com",
+        to_email="support@shoplbora.com",
+        body_text=body,
+        is_inbound=True,
+        received_at=utcnow(),
+    )
+    db.add(email)
+    db.flush()
+    return email
+
+
+def test_prefill_translations_writes_pending_inbound(
+    db, session_factory, settings, monkeypatch
+) -> None:
+    import app.services.scheduler as scheduler_mod
+
+    customer = Customer(email="c@example.com", display_name="C", created_at=utcnow())
+    db.add(customer)
+    db.flush()
+    emails = [
+        _inbound_email(db, customer.id, "Where is my order? #1"),
+        _inbound_email(db, customer.id, "The hat is damaged. #2"),
+        _inbound_email(db, customer.id, "Please refund me. #3"),
+    ]
+    db.commit()
+
+    monkeypatch.setattr(
+        scheduler_mod, "build_llm_client", lambda s: MockLLMClient(s)
+    )
+    service = SchedulerService(settings, session_factory=session_factory)
+    service._job_prefill_translations()
+
+    db.expire_all()
+    for em in emails:
+        row = db.get(Email, em.id)
+        assert row.content_cn is not None
+        assert "(Mock translation)" in row.content_cn
+
+
+def test_prefill_handles_all_failures_without_crashing(
+    db, session_factory, settings, monkeypatch
+) -> None:
+    """A permanently failing LLM must not raise out of the job or block others."""
+    import app.services.scheduler as scheduler_mod
+
+    customer = Customer(email="c@example.com", display_name="C", created_at=utcnow())
+    db.add(customer)
+    db.flush()
+    emails = [
+        _inbound_email(db, customer.id, f"Refund request #{i}") for i in range(3)
+    ]
+    db.commit()
+
+    monkeypatch.setattr(
+        scheduler_mod,
+        "build_llm_client",
+        lambda s: FlakyLLM(s, fail_calls=100),  # every call fails (even retries)
+    )
+    service = SchedulerService(settings, session_factory=session_factory)
+    service._job_prefill_translations()  # must not raise
+
+    db.expire_all()
+    for em in emails:
+        assert db.get(Email, em.id).content_cn is None
+
+
+def test_prefill_skips_empty_body(
+    db, session_factory, settings, monkeypatch
+) -> None:
+    import app.services.scheduler as scheduler_mod
+
+    customer = Customer(email="c@example.com", display_name="C", created_at=utcnow())
+    db.add(customer)
+    db.flush()
+    empty = _inbound_email(db, customer.id, "   ")
+    normal = _inbound_email(db, customer.id, "Please help.")
+    db.commit()
+
+    monkeypatch.setattr(
+        scheduler_mod, "build_llm_client", lambda s: MockLLMClient(s)
+    )
+    service = SchedulerService(settings, session_factory=session_factory)
+    service._job_prefill_translations()
+
+    db.expire_all()
+    assert db.get(Email, empty.id).content_cn is None
+    assert db.get(Email, normal.id).content_cn is not None

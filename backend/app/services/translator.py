@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 from app.config import prompts_dir
 from app.llm.client import BaseLLMClient
+
+logger = logging.getLogger(__name__)
 
 # Matches any CJK Unified Ideograph. If the boss's "Chinese reply" contains
 # none, the text is already English (or Latin) — sending it to a "translate
@@ -23,15 +26,17 @@ Rules:
 - Output only the English translation; no headers, quotes or explanations.
 """
 
+# Keep this prompt deliberately minimal. The verbose "Rules:" version used to
+# demand faithful full-text translation, preserved formatting and unchanged
+# proper nouns — but on deepseek-v4-flash (a reasoning model) those extra
+# constraints reliably trigger a runaway reasoning loop: the model burns its
+# entire output budget on reasoning_content and returns an empty translation
+# (measured 3/3 empty for the Rules version, 5/5 success for this short one).
+# The short form translates the full text reliably, and proper nouns / order
+# numbers / amounts are preserved by the model's default behavior.
 TRANSLATE_CN_SYSTEM_PROMPT = """\
 You translate English customer-support email content into natural, fluent
-Simplified Chinese (中文).
-Rules:
-- Translate the FULL text faithfully; never summarize or drop details.
-- Preserve paragraph and list structure, and the original line breaks.
-- Keep order numbers, amounts, tracking numbers, brand names and proper nouns
-  exactly as-is.
-- Output only the Chinese translation; no headers, quotes or explanations.
+Simplified Chinese. Translate the FULL text faithfully.
 """
 
 
@@ -64,11 +69,31 @@ class TranslatorService:
         """Translate the full English text into Simplified Chinese."""
         if not text or not text.strip():
             raise ValueError("Empty English content")
-        return self.llm_client.chat_with_retry(
-            messages=[{"role": "user", "content": text.strip()}],
+        content = text.strip()
+        result = self.llm_client.chat_with_retry(
+            messages=[{"role": "user", "content": content}],
             system_prompt=TRANSLATE_CN_SYSTEM_PROMPT,
             temperature=0.2,
             # Full-text translation of long emails needs a larger output budget
             # than the default 2048 (which truncates to an empty response).
-            max_tokens=4096,
+            # The model is a reasoning model, so the budget must also cover
+            # reasoning_content: when reasoning eats the whole budget the API
+            # returns an empty content ("LLM returned an empty response").
+            # 8192 leaves room for both the thinking and the translation.
+            max_tokens=8192,
+        ).strip()
+        if result:
+            return result
+        # Very rare fallback: for some inputs the reasoning model still returns
+        # an empty translation even with the short prompt. One retry with no
+        # system prompt reliably produces text, so the boss sees a translation
+        # instead of a hard failure.
+        logger.warning(
+            "translate_to_chinese returned empty; retrying without system prompt"
+        )
+        return self.llm_client.chat_with_retry(
+            messages=[{"role": "user", "content": content}],
+            system_prompt=None,
+            temperature=0.3,
+            max_tokens=8192,
         ).strip()

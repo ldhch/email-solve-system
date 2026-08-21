@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { dataOf, errorText, http } from "../api/client";
 import { formatLocal } from "../utils/format";
 
@@ -50,6 +50,19 @@ function normalizeSpacing(text?: string | null): string {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/^[ \t]+/gm, "")
     .replace(/\n{3,}/g, "\n\n");
+}
+
+// A browser/network timeout on the on-demand translate call is NOT a hard
+// failure: the backend keeps translating in a worker thread and caches the
+// result, so the frontend switches to polling the status endpoint instead.
+// Hard errors (LLM_FAILED, NOT_FOUND, ...) still surface immediately.
+function isTimeoutError(err: unknown): boolean {
+  return (
+    (typeof err === "object" &&
+      err !== null &&
+      (err as { code?: string }).code === "ECONNABORTED") ||
+    (err instanceof Error && /timeout/i.test(err.message))
+  );
 }
 
 // The full-text translation is a plain wall of Chinese text, but the email it
@@ -489,27 +502,95 @@ export function Timeline({
   const [translating, setTranslating] = useState(false);
   const [translateError, setTranslateError] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
+  // One automatic retry per email when the first on-demand call fails: long
+  // emails can run close to the request timeout even when the model succeeds.
+  const [retryTick, setRetryTick] = useState(0);
+  // When the on-demand POST exhausts its retries on a timeout, the backend
+  // keeps translating off-thread; poll the status endpoint until the Chinese
+  // appears so the boss never has to reopen the email manually.
+  const [pollingId, setPollingId] = useState<number | null>(null);
+  const translateAttemptsRef = useRef<Record<number, number>>({});
 
   // Reset the fold when the conversation changes to a different email.
   useEffect(() => {
     setHistoryOpen(false);
   }, [latest?.email_id]);
 
+  // Request the full-text translation on demand. A generous per-request
+  // timeout (120s) beats the global 60s default for long emails; a single
+  // automatic retry covers transient empty-response failures. A remaining
+  // timeout hands off to status polling; only a hard error is surfaced.
   useEffect(() => {
     if (mode !== "full" || !showCn || !latest?.email_id) return;
     const id = latest.email_id;
     if (fullCn[id] || latest.content_cn) return;
     setTranslating(true);
+    const attempts = translateAttemptsRef.current[id] ?? 0;
     http
-      .post(`/emails/${id}/translate`)
+      .post(`/emails/${id}/translate`, undefined, { timeout: 120000 })
       .then((resp) => {
         const data = dataOf<{ content_cn: string }>(resp);
         setFullCn((prev) => ({ ...prev, [id]: data.content_cn }));
         setTranslateError("");
+        translateAttemptsRef.current[id] = 0;
       })
-      .catch((err) => setTranslateError(errorText(err)))
+      .catch((err) => {
+        const next = attempts + 1;
+        translateAttemptsRef.current[id] = next;
+        if (next < 2) {
+          setRetryTick((t) => t + 1); // one automatic retry
+        } else if (isTimeoutError(err)) {
+          setPollingId(id); // backend still translating in a worker thread
+        } else {
+          setTranslateError(errorText(err)); // hard failure, no point polling
+        }
+      })
       .finally(() => setTranslating(false));
-  }, [mode, showCn, latest?.email_id]);
+  }, [mode, showCn, latest?.email_id, retryTick]);
+
+  // Poll the translation status while the on-demand call is stuck on a
+  // timeout. The backend keeps translating off-thread (and the prefill job
+  // may also pick the email up), so the Chinese eventually appears without
+  // the boss reopening the email. Bounded so a permanently failing
+  // translation surfaces an error instead of polling forever.
+  useEffect(() => {
+    if (pollingId == null) return;
+    let cancelled = false;
+    let polls = 0;
+    const timer = setInterval(async () => {
+      if (cancelled) return;
+      polls += 1;
+      try {
+        const resp = await http.get(`/emails/${pollingId}/translate/status`);
+        const data = dataOf<{ status: string; content_cn: string | null }>(
+          resp,
+        );
+        if (data.status === "done" && data.content_cn) {
+          cancelled = true;
+          setFullCn((prev) => ({ ...prev, [pollingId]: data.content_cn! }));
+          setTranslateError("");
+          setPollingId(null);
+          setTranslating(false);
+          return;
+        }
+      } catch {
+        // the status endpoint is read-only; a transient error just means we
+        // poll again on the next tick
+      }
+      if (polls >= 24) {
+        cancelled = true;
+        setPollingId(null);
+        setTranslating(false);
+        setTranslateError(
+          "翻译未能在预期时间内完成，请稍后重新打开查看（后台会继续翻译并缓存）。",
+        );
+      }
+    }, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [pollingId]);
 
   if (!latest) return null;
 
