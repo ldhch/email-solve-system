@@ -208,10 +208,23 @@ class MailerService:
             except Exception:  # noqa: BLE001 - already gone
                 pass
 
-    def send(self, reply, to_email: str, subject: str) -> None:
-        """Send with 3 attempts; raise SMTPError after all retries."""
+    def send(
+        self,
+        reply,
+        to_email: str,
+        subject: str,
+        *,
+        bypass_rate_limit: bool = False,
+    ) -> None:
+        """Send with 3 attempts; raise SMTPError after all retries.
 
-        self._check_rate_limit()
+        ``bypass_rate_limit`` is for owner-triggered sends (manual reply, review
+        approval, draft send): the boss's explicit action must never be blocked
+        by the automatic hourly quota. Automated pipeline sends keep the limit.
+        """
+
+        if not bypass_rate_limit:
+            self._check_rate_limit()
         msg = build_message(reply, to_email, subject, self.settings)
         last_error: Exception | None = None
         for attempt in range(1, 4):

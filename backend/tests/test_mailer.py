@@ -104,6 +104,28 @@ def test_send_success(db, settings, fake_smtp_class) -> None:
     assert FakeSMTP.instances[0].sent[0]["To"] == "customer@example.com"
 
 
+def test_rate_limit_blocks_automated_but_owner_bypasses(
+    db, settings, fake_smtp_class
+) -> None:
+    """Owner-triggered sends skip the hourly quota; automated sends respect it."""
+    settings = settings.model_copy(update={"smtp_rate_limit_per_hour": 1})
+    service = MailerService(db, settings, smtp_class=FakeSMTP)
+    # One send in the rolling 1h window -> quota exhausted (the rate limiter
+    # counts DB rows with status=sent, matching real pipeline behavior).
+    sent = _reply()
+    sent.status = "sent"
+    sent.sent_at = utcnow()
+    db.add(sent)
+    db.commit()
+    with pytest.raises(SMTPRateLimitError):
+        service.send(_reply(), "customer2@example.com", "Q2")  # automated blocked
+    # explicit owner action goes through even with the quota exhausted
+    service.send(
+        _reply(), "customer3@example.com", "Q3", bypass_rate_limit=True
+    )
+    assert len(FakeSMTP.instances) == 1
+
+
 def test_send_appends_copy_to_sent_folder(db, fake_smtp_class) -> None:
     FakeIMAPAppend.reset()
     settings = Settings(

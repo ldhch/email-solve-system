@@ -121,7 +121,10 @@ class Settings(BaseSettings):
     agent_service_token: str = ""
 
     # SMTP send policy
-    smtp_rate_limit_per_hour: int = 0  # 0 = disabled
+    # Hourly cap on OUTBOUND SMTP sends (0 = disabled). Only applies to the
+    # automated pipeline; owner-triggered sends bypass it (mailer.send
+    # bypass_rate_limit=True). 60/hour is a safe middle ground for Titan.
+    smtp_rate_limit_per_hour: int = 60
     imap_timeout: int = 30
     smtp_timeout: int = 30
     # Mailbox folder where a copy of every outbound reply is stored via IMAP
