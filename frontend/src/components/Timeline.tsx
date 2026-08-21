@@ -100,7 +100,11 @@ function sanitizeText(text: string): string {
     .replace(/\r\n/g, "\n")
     .split("\n")
     .map((line) => {
-      let s = line.replace(/<[^>]*>/g, "");
+      // Strip HTML tags but keep quoted-header emails like "<user@host>",
+      // which look like tags but carry the sender's address (their "@" makes
+      // the quote-round head detectable). A tag that itself contains an "@"
+      // (rare, e.g. mailto hrefs) is left in place rather than eating the email.
+      let s = line.replace(/<(?![^>]*@)[^>]*>/g, "");
       s = s.replace(/[\u034f\u00ad\u200b\u200c\u200d\u2060\ufeff]/g, "");
       const t = s.trim();
       if (!t) return "";
@@ -249,9 +253,30 @@ function parseRoundHead(line: string): { email: string; ts: number | null } {
 
 // Unparseable headers show "—" (never dropped).
 function parseQuotedRounds(lines: QuoteLine[]): QuoteMsg[] {
+  // Gmail splits the quote header across two lines: "On …, addr <" followed
+  // by "addr> wrote:", and "On …, addr>" followed by a bare "wrote:". Rejoin
+  // such continuation lines first, otherwise the fragment "addr> wrote:" is
+  // mis-detected as a round head (it carries both "@" and "wrote:") and the
+  // customer's message bleeds into our previous reply.
+  const merged: QuoteLine[] = [];
+  for (const ql of lines) {
+    const last = merged[merged.length - 1];
+    if (
+      last &&
+      !isRoundHead(last.text) &&
+      /@/.test(last.text) &&
+      /(wrote:|写道：)/.test(ql.text) &&
+      (/<\s*$/.test(last.text) || /^\s*(wrote:|写道：)\s*$/.test(ql.text))
+    ) {
+      last.text = `${last.text} ${ql.text}`;
+    } else {
+      merged.push({ ...ql });
+    }
+  }
+
   const rounds: QuoteMsg[] = [];
   let cur: QuoteMsg | null = null;
-  for (const { text } of lines) {
+  for (const { text } of merged) {
     if (isRoundHead(text)) {
       if (cur) rounds.push(cur);
       const { email, ts } = parseRoundHead(text);
@@ -552,15 +577,17 @@ export function Timeline({
             at={latestAt}
           />
           {showCn ? (
-            translating && !fullCn[id] && !latest.content_cn ? (
-              <div className="text-[16px] leading-normal text-sub">
-                全文翻译中…
-              </div>
-            ) : (
-              <EmailBodyView text={fullText} />
-            )
+            // While the translation is in flight, fall back to the English
+            // original (fullText resolves to latest.content when uncached) so
+            // the boss can read immediately instead of staring at a spinner.
+            <EmailBodyView text={fullText} />
           ) : (
             <EmailBodyView text={latest.content ?? ""} />
+          )}
+          {translating && !fullCn[id] && !latest.content_cn && (
+            <p className="mt-1.5 text-[12px] text-sub">
+              中文翻译生成中，先显示英文原文…
+            </p>
           )}
           {translateError && (
             <p className="mt-1 text-[12px] text-risk-high">{translateError}</p>

@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     # How many past message rounds the LLM sees when drafting a reply. Bumped
     # from 6 to 12 so long threads keep their early promises/context.
     reply_history_max_turns: int = 12
+    # Background EN->ZH full-text translation prefill: inbound emails get a
+    # cached Chinese letter in the scheduler so the boss opens an already
+    # translated thread instead of waiting on a synchronous LLM call. Batch
+    # size bounds how much wall-clock each round spends (serial timer, no queue).
+    translation_prefill_batch_size: int = 3
     poll_interval_seconds: int = 90
     # Optional return-handling instructions appended to "release" replies.
     # Empty => the reply asks the customer for their order number first

@@ -34,6 +34,7 @@ from app.services.audit import log_action, utcnow
 from app.services.ingest import IngestService
 from app.services.mailer import MailerService
 from app.services.replier import ReplierService
+from app.services.translator import TranslatorService
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,11 @@ class SchedulerService:
             (
                 "fetch_mail",
                 self._job_fetch_mail,
+                {"seconds": max(30, settings.poll_interval_seconds)},
+            ),
+            (
+                "prefill_translations",
+                self._job_prefill_translations,
                 {"seconds": max(30, settings.poll_interval_seconds)},
             ),
             ("auto_close_sessions", self._job_auto_close_sessions, {"hours": 1}),
@@ -148,6 +154,48 @@ class SchedulerService:
                 logger.info("Scheduled poll summary: %s", summary)
         except Exception as exc:  # noqa: BLE001 - the timer must survive
             logger.exception("Scheduled poll failed: %s", exc)
+
+    # ---------- job 1b: full-text translation prefill ----------
+
+    def _job_prefill_translations(self) -> None:
+        """Translate inbound emails that lack a cached Chinese full text.
+
+        Runs on the same cadence as the mail poll. Each round takes up to
+        ``translation_prefill_batch_size`` emails (oldest first) so a burst of
+        unread mail is backfilled over a few rounds; when nothing is pending
+        the query is a fast empty scan. A single failure must not stall the
+        rest of the batch, and never kills the timer.
+        """
+
+        factory = self._factory()
+        with factory() as db:
+            translator = TranslatorService(build_llm_client(self.settings))
+            pending = db.execute(
+                select(Email)
+                .where(
+                    Email.is_inbound.is_(True),
+                    Email.content_cn.is_(None),
+                    Email.body_text.isnot(None),
+                )
+                .order_by(Email.received_at.asc())
+                .limit(self.settings.translation_prefill_batch_size)
+            ).scalars().all()
+            translated = 0
+            for email in pending:
+                body = (email.body_text or "").strip()
+                if not body:
+                    continue
+                try:
+                    email.content_cn = translator.translate_to_chinese(body)
+                    db.commit()
+                    translated += 1
+                except Exception as exc:  # noqa: BLE001 - one mail must not block the batch
+                    db.rollback()
+                    logger.warning(
+                        "Prefill translation failed for email=%s: %s", email.id, exc
+                    )
+            if translated:
+                logger.info("Prefilled %s translation(s)", translated)
 
     # ---------- job 2: auto-close stale sessions ----------
 

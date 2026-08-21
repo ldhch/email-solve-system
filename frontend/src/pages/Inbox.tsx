@@ -203,6 +203,12 @@ export default function Inbox() {
     if (selectedId != null) loadConv(selectedId);
   }, [selectedId, loadConv]);
 
+  // Opening a different conversation always lands on 概括 first; only a
+  // deliberate toggle shows 全文 (which by then is pre-translated/cached).
+  useEffect(() => {
+    setConvMode("summary");
+  }, [selectedId]);
+
   const refresh = useCallback(async () => {
     if (selectedId != null) await loadConv(selectedId);
     await load();
