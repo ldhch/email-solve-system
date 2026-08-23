@@ -6,6 +6,7 @@ from app.models.blocked_sender import BlockedSender
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.email import Email
+from app.models.imap_skip import ImapSkip
 from app.models.knowledge_doc import KnowledgeDoc
 from app.models.qa_pair import QAPair
 from app.models.reply import Reply
@@ -21,6 +22,7 @@ __all__ = [
     "Conversation",
     "Customer",
     "Email",
+    "ImapSkip",
     "KnowledgeDoc",
     "QAPair",
     "Reply",

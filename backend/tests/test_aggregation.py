@@ -92,7 +92,10 @@ def test_two_low_risk_mails_one_aggregated_reply(
     assert reply.status == "sent"
     assert reply.in_reply_to == "agg-2@example.com"  # newest email in the batch
     assert len(FakeSMTP.instances[0].sent) == 1
-    assert imap.seen == ["1", "2"]
+    # The server \Seen flag is never touched: webmail keeps the boss's unread
+    # state. Processed mail is skipped next poll by its persisted imap_uid.
+    assert imap.seen == []
+    assert {e.imap_uid for e in emails} == {"1", "2"}
 
     # The LLM prompt contains BOTH questions (aggregation, not last-mail-only).
     user_content = "\n".join(llm.user_contents)
@@ -158,7 +161,11 @@ def test_smtp_failure_keeps_aggregated_reply_and_retries_same_draft(
     summary = service.fetch_and_process()
     assert summary["failed"] == 1
     assert summary["auto_sent"] == 0
-    assert imap.seen == ["1"]  # newest mail stays UNSEEN for the retry
+    # Nothing is flagged \Seen on the server; instead the newest mail's
+    # persisted UID is cleared so the next poll re-fetches it for the retry.
+    assert imap.seen == []
+    rows = db.execute(select(Email).order_by(Email.id)).scalars().all()
+    assert {r.imap_uid for r in rows} == {"1", None}
 
     reply = db.execute(select(Reply)).scalar_one()
     assert reply.status == "failed"
@@ -166,7 +173,9 @@ def test_smtp_failure_keeps_aggregated_reply_and_retries_same_draft(
 
     FakeSMTP.reset(fail_remaining=0)
     summary2 = service.fetch_and_process()
+    assert summary2["fetched"] == 1  # only the cleared uid is re-fetched
     assert summary2["auto_sent"] == 1
+    assert imap.fetched == ["1", "2", "2"]
     replies = db.execute(select(Reply)).scalars().all()
     assert len(replies) == 1  # same draft, no regeneration
     assert replies[0].status == "sent"
@@ -206,4 +215,4 @@ def test_generation_failure_removes_batch_and_retries_next_poll(
     assert len(db.execute(select(Email)).scalars().all()) == 2
     assert len(db.execute(select(Conversation)).scalars().all()) == 1
     assert db.execute(select(Reply)).scalars().one().status == "sent"
-    assert imap.seen == ["1", "2"]
+    assert imap.seen == []  # server \Seen is never written by the poll

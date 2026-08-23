@@ -15,13 +15,14 @@ from app.models.blocked_sender import BlockedSender
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.email import Email
+from app.models.imap_skip import ImapSkip
 from app.models.reply import Reply
 from app.models.system_state import SystemState
 from app.services.ingest import IngestService, _html_to_text, parse_email
 from app.services.audit import utcnow
 from app.services.mailer import MailerService
 
-from conftest import FakeSMTP, make_raw_email
+from conftest import FakeIMAP, FakeSMTP, make_raw_email
 
 
 class _LowConfidenceClassifier(MockLLMClient):
@@ -317,8 +318,14 @@ def test_fetch_test_mode_gates_non_whitelisted_sender(
     assert summary["test_skipped"] == 1
     emails = db.execute(select(Email)).scalars().all()
     assert [e.message_id for e in emails] == ["gate-a@example.com"]
-    assert "1" in imap.seen      # whitelisted sender processed -> marked seen
-    assert "2" not in imap.seen  # gated mail stays UNSEEN
+    # The server \Seen flag is never touched; the whitelisted mail is tracked
+    # by its persisted imap_uid, and the gated mail stays untouched.
+    assert imap.seen == []
+    assert {e.imap_uid for e in emails} == {"1"}
+    # Next poll: the gated mail is re-fetched (not ingested, no UID recorded);
+    # the whitelisted mail is skipped via its persisted UID.
+    service.fetch_and_process()
+    assert imap.fetched == ["1", "2", "2"]
 
 
 def test_fetch_test_mode_empty_whitelist_isolates_everything(
@@ -391,3 +398,96 @@ def test_pending_backlog_respects_test_mode(db, settings, fake_smtp_class) -> No
     assert summary["test_skipped"] == 1
     db.expire_all()
     assert db.get(Email, email.id).pending_after_pause is True  # stays queued
+
+
+def test_fetch_never_marks_seen_and_persists_uid(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    """The poll never writes \\Seen to the server; processed mail is tracked
+    by its persisted imap_uid (+ uidvalidity) instead."""
+    raw = make_raw_email(
+        subject="Order question",
+        body="Where is my hat?",
+        message_id="<noscen-1@example.com>",
+    )
+    imap = fake_imap([("3", raw)])
+    service = IngestService(
+        db,
+        settings,
+        llm_client=MockLLMClient(settings),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    summary = service.fetch_and_process()
+    assert summary["fetched"] == 1
+    assert imap.seen == []  # server \Seen untouched
+    email = db.execute(select(Email)).scalar_one()
+    assert email.imap_uid == "3"
+    assert email.imap_uidvalidity == FakeIMAP.UIDVALIDITY
+
+
+def test_skipped_uid_is_not_fetched_again(db, settings, fake_imap) -> None:
+    """A malformed mail's UID is recorded once (ImapSkip) and never re-fetched."""
+    raw = make_raw_email(message_id="<skip-1@example.com>")
+    imap = fake_imap([("7", raw)])
+    service = IngestService(
+        db,
+        settings,
+        llm_client=MockLLMClient(settings),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    # Simulate the poll recording a parse failure for uid "7".
+    service._current_uidvalidity = FakeIMAP.UIDVALIDITY
+    service._skip_uid("7")
+    assert db.execute(select(ImapSkip)).scalars().all()
+    assert service.fetch_unseen(imap) == []  # skipped uid is not fetched
+
+
+def test_old_seen_mail_is_not_refetched(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    """Mail the previous poll already flagged \\Seen is never re-downloaded.
+
+    This is what keeps an upgrade safe: the old poll marked everything seen on
+    the server, so ``SEARCH UNSEEN`` simply does not return historical mail.
+    """
+    customer = Customer(email="old@example.com", display_name="Old", created_at=utcnow())
+    db.add(customer)
+    db.flush()
+    conv = Conversation(
+        customer_id=customer.id,
+        subject_normalized="old mail",
+        window_end=utcnow(),
+        last_activity_at=utcnow(),
+        status="open",
+        risk_level="medium",
+    )
+    db.add(conv)
+    db.flush()
+    email = Email(
+        conversation_id=conv.id,
+        message_id="old-1@example.com",
+        subject="Old mail",
+        from_email="old@example.com",
+        to_email="bot@example.com",
+        body_text="hello",
+        is_inbound=True,
+        received_at=utcnow(),
+    )
+    db.add(email)
+    db.commit()
+
+    raw = make_raw_email(subject="Old mail", message_id="<old-1@example.com>")
+    imap = fake_imap([("9", raw)])
+    imap.seen.append("9")  # the old system marked it seen on the server
+    service = IngestService(
+        db,
+        settings,
+        llm_client=MockLLMClient(settings),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    summary = service.fetch_and_process()
+    assert summary["fetched"] == 0  # UNSEEN search never returns it
+    assert imap.seen == ["9"]  # and nothing new was flagged seen either

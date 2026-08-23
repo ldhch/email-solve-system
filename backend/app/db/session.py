@@ -202,6 +202,17 @@ def _ensure_reply_low_confidence_column(engine: Engine) -> None:
             )
 
 
+def _ensure_email_imap_uid_columns(engine: Engine) -> None:
+    """Add ``emails.imap_uid`` / ``emails.imap_uidvalidity`` to existing DBs."""
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(emails)"))}
+        if "imap_uid" not in cols:
+            conn.execute(text("ALTER TABLE emails ADD COLUMN imap_uid VARCHAR(64)"))
+        if "imap_uidvalidity" not in cols:
+            conn.execute(text("ALTER TABLE emails ADD COLUMN imap_uidvalidity VARCHAR(64)"))
+
+
 def _ensure_system_state_test_columns(engine: Engine) -> None:
     """Add ``system_state.test_mode`` / ``test_whitelist`` to existing DBs."""
 
@@ -238,6 +249,7 @@ def init_db(settings: Settings | None = None) -> None:
     _ensure_reply_source_column(engine)
     _ensure_email_content_cn_column(engine)
     _ensure_email_is_ad_column(engine)
+    _ensure_email_imap_uid_columns(engine)
     _ensure_reply_low_confidence_column(engine)
     _ensure_system_state_test_columns(engine)
     seed(settings)

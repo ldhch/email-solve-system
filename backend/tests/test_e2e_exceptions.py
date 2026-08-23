@@ -345,7 +345,9 @@ def test_exception_06_empty_mail_goes_to_manual(db, settings, fake_smtp_class, f
     assert "可疑" in (email.summary_cn or "")
     assert db.execute(select(Reply)).scalars().all() == []
     assert "requires_manual" in _audit_actions(db)
-    assert imap.seen == ["1"]
+    # The manual mail is tracked by its persisted UID, never flagged seen.
+    assert imap.seen == []
+    assert email.imap_uid == "1"
 
 
 # ---------- scenario 7: poor-language / unclassifiable -> manual ----------

@@ -65,10 +65,11 @@ def test_low_risk_auto_reply_end_to_end(
 
     assert summary["auto_sent"] == 1
     assert summary["fetched"] == 1
-    assert imap.seen == ["1"]
+    assert imap.seen == []  # server \Seen is never touched by the poll
 
     email = db.execute(select(Email)).scalar_one()
     assert email.message_id == "e2e-1@example.com"
+    assert email.imap_uid == "1"  # processed mail is tracked by its UID, not flags
     assert email.risk_level == "low"
     assert email.category == "product_spec"
     assert email.summary_cn
@@ -385,9 +386,10 @@ def test_generation_failure_rolls_back_and_can_retry(
     assert second["auto_sent"] == 1
     email = db.execute(select(Email)).scalar_one()
     assert email.message_id == "genfail-1@example.com"
+    assert email.imap_uid == "6"  # regenerated mail is tracked by its UID
     reply = db.execute(select(Reply)).scalar_one()
     assert reply.status == "sent"
-    assert imap.seen == ["6"]
+    assert imap.seen == []  # server \Seen is never touched by the poll
 
 
 def test_paused_system_ingests_but_does_not_reply(
@@ -406,7 +408,8 @@ def test_paused_system_ingests_but_does_not_reply(
     assert email.message_id == "paused-1@example.com"
     assert email.pending_after_pause is True
     assert email.is_read is False  # shows as unread in the inbox
-    assert imap.seen == ["9"]  # consumed; resumed from the DB backlog, not IMAP
+    assert email.imap_uid == "9"  # consumed; resumed from the DB backlog, not IMAP
+    assert imap.seen == []  # server \Seen is never touched by the poll
     assert db.execute(select(Reply)).scalars().all() == []
     actions = {a.action for a in db.execute(select(AuditLog)).scalars().all()}
     assert "paused_skipped" in actions
@@ -436,7 +439,7 @@ def test_resume_reprocesses_paused_backlog(
     db.commit()
     second = service.fetch_and_process()
     assert second["auto_sent"] == 1
-    assert second["fetched"] == 0  # already consumed; no fresh UNSEEN mail
+    assert second["fetched"] == 0  # already consumed; skipped via its imap_uid
     reply = db.execute(select(Reply)).scalar_one()
     assert reply.status == "sent"
     db.refresh(email)
@@ -487,7 +490,7 @@ def test_failed_reply_is_resent_without_regeneration(
     assert len(replies) == 1  # reused draft, no LLM regeneration / new row
     assert replies[0].status == "sent"
     assert replies[0].content_en == original_content
-    assert imap.seen == ["4"]
+    assert imap.seen == []  # server \Seen is never touched by the poll
 
 
 def test_duplicate_uid_second_cycle_skipped(db, settings, fake_smtp_class, fake_imap) -> None:
@@ -499,4 +502,4 @@ def test_duplicate_uid_second_cycle_skipped(db, settings, fake_smtp_class, fake_
     first = service.fetch_and_process()
     second = service.fetch_and_process()
     assert first["auto_sent"] == 1
-    assert second["fetched"] == 0  # already marked SEEN
+    assert second["fetched"] == 0  # already processed; skipped via its imap_uid

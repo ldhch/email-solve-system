@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from datetime import date, timedelta
 from email.message import EmailMessage
 
 import pytest
@@ -12,6 +14,27 @@ from sqlalchemy.pool import StaticPool
 from app.config import Settings
 from app.db.base import Base
 from app.models.system_state import SystemState
+
+_MID_RE = re.compile(rb"Message-ID:\s*<([^>\r\n]+)>", re.IGNORECASE)
+
+
+def _mid_from_raw(raw: bytes) -> str:
+    """Bare Message-ID from a raw email (FakeIMAP header-FETCH helper)."""
+
+    match = _MID_RE.search(raw)
+    return match.group(1).decode("utf-8") if match else "unknown@local"
+
+
+_IMAP_MONTHS = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]
+
+
+def _recent_internaldate(days_ago: int = 2) -> str:
+    """An INTERNALDATE string safely inside the poll's fetch window."""
+    d = date.today() - timedelta(days=days_ago)
+    return f"{d.day:02d}-{_IMAP_MONTHS[d.month - 1]}-{d.year} 10:00:00 +0000"
 
 
 @pytest.fixture()
@@ -122,21 +145,61 @@ class FakeSMTP:
 
 
 class FakeIMAP:
-    """Minimal in-memory IMAP: SEARCH UNSEEN / FETCH / STORE +FLAGS."""
+    """Minimal in-memory IMAP: SEARCH (ALL/UNSEEN) / FETCH / STORE +FLAGS.
+
+    ``fetched`` records which UIDs were body-fetched so tests can assert the
+    poll skips already-processed mail without relying on server \\Seen flags.
+    """
+
+    UIDVALIDITY = "12345"
 
     def __init__(self, items: list[tuple[str, bytes]]) -> None:
         self.items = dict(items)
         self.seen: list[str] = []
+        self.fetched: list[str] = []
+        self.internaldate = _recent_internaldate()
+
+    def status(self, mailbox: str, names: str) -> tuple[str, list]:
+        return ("OK", [f"{mailbox} (UIDVALIDITY {self.UIDVALIDITY})".encode()])
 
     def uid(self, *args) -> tuple[str, list]:
         command = args[0]
         if command == "SEARCH":
-            uids = [u for u in self.items if u not in self.seen]
+            criteria = " ".join(str(a) for a in args[1:] if a is not None).upper()
+            uids = list(self.items)
+            if "UNSEEN" in criteria:
+                uids = [u for u in uids if u not in self.seen]
             return ("OK", [b" ".join(u.encode() for u in uids)])
         if command == "FETCH":
-            uid = args[1]
-            raw = self.items[uid]
-            return ("OK", [(f"1 (RFC822 {{{len(raw)}}}".encode(), raw)])
+            # uid-set / 1:* fetch; marker carries UID so the batched parser can
+            # pair each response back to its message. Header-only FETCH (used by
+            # the UID backfill) returns just the Message-ID literal, not a body.
+            uid_spec = str(args[1])
+            item_spec = " ".join(str(a) for a in args[2:] if a is not None)
+            if uid_spec == "1:*":
+                fetch_uids = list(self.items)
+            elif ":" in uid_spec and uid_spec.replace(":", "").isdigit():
+                low, high = uid_spec.split(":", 1)
+                fetch_uids = [
+                    u for u in self.items if int(low) <= int(u) <= int(high)
+                ]
+            else:
+                fetch_uids = uid_spec.split(",")
+            header_only = "HEADER.FIELDS" in item_spec
+            responses = []
+            for uid in fetch_uids:
+                raw = self.items[uid]
+                if header_only:
+                    literal = f"Message-ID: <{_mid_from_raw(raw)}>\r\n".encode()
+                else:
+                    self.fetched.append(uid)
+                    literal = raw
+                marker = (
+                    f'{uid} (INTERNALDATE "{self.internaldate}" '
+                    f"UID {uid} BODY[] {{{len(literal)}}}"
+                )
+                responses.append((marker.encode(), literal))
+            return ("OK", responses)
         if command == "STORE":
             self.seen.append(args[1])
             return ("OK", [None])

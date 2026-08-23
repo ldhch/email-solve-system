@@ -281,6 +281,50 @@ def test_inbox_conversation_read(settings, session_factory) -> None:
         close_client(client)
 
 
+def test_inbox_read_mirrors_seen_to_server(
+    settings, session_factory, monkeypatch
+) -> None:
+    """方案 B: reading mail in the admin also STOREs \\Seen on the mailbox.
+
+    The poll never flags mail seen; only this explicit read mirrors back the
+    server UIDs, so webmail unread state follows what the boss actually opened.
+    """
+
+    ids = _seed_conversation(session_factory, emails=2)
+    # Give the seeded mail server-side identities, as a real poll would.
+    with session_factory() as db:
+        emails = db.execute(
+            select(Email).where(Email.conversation_id == ids["conversation_id"])
+        ).scalars().all()
+        for i, e in enumerate(emails, start=1):
+            e.imap_uid = f"UID-{i}"
+            e.imap_uidvalidity = "12345"
+        db.commit()
+
+    mirrored: list[list[str]] = []
+    monkeypatch.setattr(
+        "app.api.inbox.mark_seen_on_server",
+        lambda settings, uids: mirrored.append(uids),
+    )
+    client = _authed_client(settings, session_factory)
+    try:
+        # Single-email read mirrors that one UID.
+        single = api(client, "POST", f"/api/v1/inbox/{ids['email_ids'][0]}/read")
+        assert single.status_code == 200
+        assert mirrored[-1] == ["UID-1"]
+
+        # Conversation read mirrors every still-unread email's UID.
+        resp = api(
+            client,
+            "POST",
+            f"/api/v1/inbox/conversations/{ids['conversation_id']}/read",
+        )
+        assert resp.status_code == 200
+        assert mirrored[-1] == ["UID-2"]  # UID-1 was already read
+    finally:
+        close_client(client)
+
+
 def test_inbox_unread_sort_and_conv_status(settings, session_factory) -> None:
     ids_a = _seed_conversation(session_factory, customer_email="a@example.com")
     ids_b = _seed_conversation(session_factory, customer_email="b@example.com")
@@ -334,6 +378,53 @@ def test_inbox_risk_sort(settings, session_factory) -> None:
         assert [i["id"] for i in items] == [
             ids_high["conversation_id"],
             ids_low["conversation_id"],
+        ]
+    finally:
+        close_client(client)
+
+
+def test_inbox_counts_aggregate_badges(settings, session_factory) -> None:
+    """/inbox/counts returns every tab badge in one request, and the
+    「无法判定」 badge only counts unknown conversations that still have unread
+    mail — once the boss has looked at the unclassifiable item it stops being
+    a to-do and drops out of the badge and the tab."""
+    ids_review = _seed_conversation(
+        session_factory,
+        reply={"status": "pending_review"},
+        customer_email="review@example.com",
+    )
+    ids_unknown_unread = _seed_conversation(
+        session_factory, email_risk="unknown", customer_email="unk-unread@example.com"
+    )
+    ids_unknown_read = _seed_conversation(
+        session_factory, email_risk="unknown", customer_email="unk-read@example.com"
+    )
+    ids_high = _seed_conversation(
+        session_factory, email_risk="high", customer_email="high@example.com"
+    )
+    ids_ad = _seed_conversation(
+        session_factory, is_ad=True, customer_email="ad@example.com"
+    )
+    with session_factory() as db:
+        db.get(Email, ids_unknown_read["email_ids"][0]).is_read = True
+        db.commit()
+
+    client = _authed_client(settings, session_factory)
+    try:
+        resp = api(client, "GET", "/api/v1/inbox/counts")
+        assert resp.status_code == 200, resp.text
+        counts = resp.json()["data"]
+        assert counts["pending_review"] == 1
+        assert counts["unknown"] == 1  # the read one is no longer a to-do
+        assert counts["high"] == 1
+        assert counts["ad"] == 1
+
+        # The badge and the tab must agree: only the unread unknown row shows.
+        listing = api(
+            client, "GET", "/api/v1/inbox", params={"risk_level": "unknown"}
+        ).json()["data"]["items"]
+        assert [i["id"] for i in listing] == [
+            ids_unknown_unread["conversation_id"]
         ]
     finally:
         close_client(client)
@@ -446,6 +537,38 @@ def test_manual_reply_translates_and_sends(
             assert reply.source == "manual"
             actions = {a.action for a in db.query(AuditLog).all()}
         assert "manual_reply_sent" in actions
+    finally:
+        close_client(client)
+
+
+def test_manual_reply_pure_english_backtranslates_content_cn(
+    settings, session_factory, monkeypatch
+) -> None:
+    """A pure-English manual reply sends verbatim but stores a Chinese
+    content_cn, so the CN/EN display toggle keeps working (the UI reads
+    content_cn for the "show Chinese" view)."""
+    ids = _seed_conversation(session_factory)
+    monkeypatch.setattr(
+        conversations_module,
+        "_make_mailer",
+        lambda db, s: MailerService(db, s, smtp_class=FakeSMTP),
+    )
+    client = _authed_client(settings, session_factory)
+    try:
+        resp = api(
+            client,
+            "POST",
+            f"/api/v1/conversations/{ids['conversation_id']}/reply",
+            json={"content_cn": "Thanks for your help. We are on it."},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()["data"]
+        # English input is sent verbatim (no re-translation of the wording).
+        assert data["content_en"] == "Thanks for your help. We are on it."
+        with session_factory() as db:
+            reply = db.get(Reply, data["reply_id"])
+            assert reply.content_en == "Thanks for your help. We are on it."
+            assert reply.content_cn and "(Mock translation)" in reply.content_cn
     finally:
         close_client(client)
 

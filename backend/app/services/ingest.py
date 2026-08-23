@@ -35,6 +35,7 @@ from app.models.attachment import Attachment
 from app.models.audit import AuditLog
 from app.models.conversation import Conversation
 from app.models.email import Email
+from app.models.imap_skip import ImapSkip
 from app.models.reply import Reply
 from app.models.system_state import SystemState
 from app.models.ticket import Ticket
@@ -56,6 +57,7 @@ logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 2 * 1024 * 1024  # truncate body beyond 2 MB (TECH N-2)
 WARN_RAW_BYTES = 5 * 1024 * 1024  # log warning beyond 5 MB raw email
+_FETCH_BATCH = 100  # UIDs per batched IMAP FETCH (one round-trip each)
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # drop oversized email attachments (disk-fill guard)
 _MSGID_TAG_RE = re.compile(r"^<|>$")
 _IGNORED_TAG_RE = re.compile(
@@ -86,6 +88,7 @@ class ParsedEmail:
     attachments: list[ParsedAttachment] = field(default_factory=list)
     raw_bytes: bytes = b""
     uid: str | None = None
+    uidvalidity: str | None = None
 
 
 @dataclass
@@ -254,8 +257,15 @@ def synthetic_message_id(
     return f"gen-{digest}@local"
 
 
-def parse_email(raw: bytes, uid: str | None = None) -> ParsedEmail:
-    """Parse raw RFC822 bytes into a normalized ParsedEmail."""
+def parse_email(
+    raw: bytes, uid: str | None = None, uidvalidity: str | None = None
+) -> ParsedEmail:
+    """Parse raw RFC822 bytes into a normalized ParsedEmail.
+
+    ``uid`` / ``uidvalidity`` are the server-side IMAP identity of the message,
+    persisted on the Email row so processed mail can be skipped (and the boss's
+    read mirrored) without touching the mailbox's \\Seen flag.
+    """
 
     msg = message_from_bytes(raw)
 
@@ -342,7 +352,46 @@ def parse_email(raw: bytes, uid: str | None = None) -> ParsedEmail:
         attachments=attachments,
         raw_bytes=raw,
         uid=uid,
+        uidvalidity=uidvalidity,
     )
+
+
+def mark_seen_on_server(settings: Settings, uids: list[str]) -> None:
+    """Best-effort mirror of a boss read to the mailbox: STORE \\Seen.
+
+    The poll never flags mail seen anymore (webmail keeps the boss's unread
+    state); only an explicit read in the admin flips it here. A failed sync
+    must never break the read action itself, so every error is logged and
+    swallowed.
+    """
+
+    if not uids:
+        return
+    conn = None
+    try:
+        conn = imaplib.IMAP4_SSL(
+            settings.imap_host, settings.imap_port, timeout=settings.imap_timeout
+        )
+        conn.login(settings.email_username, settings.email_password)
+        conn.select("INBOX")
+        # One UID set command covers the whole conversation read. Non-existent
+        # UIDs in the set are ignored by the server, so this is safe to batch.
+        conn.uid("STORE", ",".join(uids), "+FLAGS", r"(\Seen)")
+    except Exception as exc:  # noqa: BLE001 - best-effort sync, never fatal
+        logger.warning(
+            "Failed to mirror read status to mailbox for %d uid(s): %s",
+            len(uids),
+            exc,
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.logout()
+            except Exception:  # noqa: BLE001 - best effort
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001 - already gone
+                    pass
 
 
 class IngestService:
@@ -367,6 +416,8 @@ class IngestService:
         self.classifier = ClassifierService(settings, self.llm_client)
         self.replier = ReplierService(db, settings, self.llm_client)
         self.retention = RetentionService(db, settings, self.llm_client)
+        # UIDVALIDITY of the mailbox on the current poll (see _read_uidvalidity).
+        self._current_uidvalidity: str | None = None
 
     # ---------- IMAP transport ----------
 
@@ -392,29 +443,123 @@ class IngestService:
         raise IMAPError(f"IMAP login failed after 3 attempts: {last_error}") from last_error
 
     def fetch_unseen(self, conn: Any | None = None) -> list[tuple[str, bytes]]:
-        """Return [(uid, raw_bytes)] for all UNSEEN messages in INBOX."""
+        """Return [(uid, raw_bytes)] for INBOX mail that still needs processing.
+
+        Never writes \\Seen to the server: the boss's own mailbox keeps its
+        unread state, and it only changes when they actually open mail in the
+        admin (which then mirrors a STORE back). ``SEARCH UNSEEN`` returns only
+        genuinely unread mail — everything the old poll ingested is already
+        flagged seen on the server, so historical mail is never re-downloaded
+        or re-answered. UIDs already in the DB (persisted imap_uid) are skipped,
+        so processed mail is not re-fetched even though it stays unread until
+        the boss reads it.
+        """
 
         conn = conn or self.imap or self._connect()
+        self._current_uidvalidity = self._read_uidvalidity(conn)
         _, data = conn.uid("SEARCH", None, "UNSEEN")
-        uids = (data[0] or b"").split()
-        results: list[tuple[str, bytes]] = []
-        for uid in uids:
-            uid = uid.decode("ascii")
-            status, fetch_data = conn.uid("FETCH", uid, "(RFC822)")
-            if status != "OK" or not fetch_data:
-                logger.warning("IMAP FETCH failed for uid=%s (status=%s)", uid, status)
-                continue
-            raw = fetch_data[0][1]
-            results.append((uid, bytes(raw)))
+        uids = [u.decode("ascii") for u in (data[0] or b"").split()]
+        if not uids:
+            return []
+        processed = self._processed_uid_set(uids)
+        new = [u for u in uids if u not in processed]
+        if not new:
+            return []
+        results = self._fetch_batch(conn, new)
+        results.sort(key=lambda pair: int(pair[0]))  # chronological
         return results
 
-    def mark_seen(self, conn: Any | None, uid: str) -> None:
-        """Mark one message SEEN after successful processing (idempotent)."""
+    def _fetch_batch(
+        self, conn: Any, uids: list[str]
+    ) -> list[tuple[str, bytes]]:
+        """Fetch full bodies for a UID set in one round-trip, never \\Seen.
+
+        imaplib returns each literal response as a ``(marker, literal)`` pair;
+        the UID is read from the marker so the (uid, raw) pairing survives even
+        for large responses. Chunked to bound a single command/response size.
+        """
+
+        results: list[tuple[str, bytes]] = []
+        for start in range(0, len(uids), _FETCH_BATCH):
+            chunk = uids[start : start + _FETCH_BATCH]
+            status, fetch_data = conn.uid("FETCH", ",".join(chunk), "(BODY.PEEK[])")
+            if status != "OK":
+                logger.warning("Batched IMAP FETCH failed (status=%s)", status)
+                continue
+            for item in fetch_data:
+                if not isinstance(item, tuple) or len(item) != 2:
+                    continue  # trailing b')' separators etc.
+                marker, literal = item
+                match = re.search(rb"UID (\d+)", marker)
+                if not match:
+                    continue
+                results.append((match.group(1).decode("ascii"), bytes(literal or b"")))
+        return results
+
+    def _read_uidvalidity(self, conn: Any) -> str | None:
+        """Read INBOX UIDVALIDITY once per poll.
+
+        Guards against UID reuse after a mailbox is recreated: a stale stored
+        UID can never make us skip new mail that happens to reuse a low UID.
+        """
 
         try:
-            (conn or self.imap).uid("STORE", uid, "+FLAGS", "(\\Seen)")
+            _, data = conn.status("INBOX", "(UIDVALIDITY)")
+            if data and data[0]:
+                match = re.search(rb"UIDVALIDITY (\d+)", data[0])
+                if match:
+                    return match.group(1).decode("ascii")
         except Exception as exc:  # noqa: BLE001 - non-fatal
-            logger.warning("Failed to mark uid=%s seen: %s", uid, exc)
+            logger.warning("Could not read IMAP UIDVALIDITY: %s", exc)
+        return None
+
+    def _processed_uid_set(self, uid_list: list[str]) -> set[str]:
+        """UIDs already ingested or deliberately skipped for this mailbox.
+
+        Emails whose imap_uid was cleared (a reply is pending an SMTP retry)
+        are deliberately absent from this set, so they are re-fetched next poll.
+        """
+
+        if not uid_list or not self._current_uidvalidity:
+            return set()
+        emails = self.db.execute(
+            select(Email.imap_uid).where(
+                Email.imap_uid.in_(uid_list),
+                Email.imap_uidvalidity == self._current_uidvalidity,
+            )
+        ).scalars().all()
+        skipped = self.db.execute(
+            select(ImapSkip.uid).where(
+                ImapSkip.uid.in_(uid_list),
+                ImapSkip.uidvalidity == self._current_uidvalidity,
+            )
+        ).scalars().all()
+        return {u for u in (*emails, *skipped) if u}
+
+    def _skip_uid(self, uid: str) -> None:
+        """Record a server UID we will never ingest (malformed mail)."""
+
+        try:
+            self.db.add(
+                ImapSkip(
+                    uid=uid,
+                    uidvalidity=self._current_uidvalidity,
+                    created_at=utcnow(),
+                )
+            )
+            self.db.commit()
+        except Exception as exc:  # noqa: BLE001 - non-fatal
+            logger.warning("Failed to record skipped uid=%s: %s", uid, exc)
+
+    def _mark_for_retry(self, email_row: Email) -> None:
+        """Clear the persisted server UID so a failed mail is re-fetched.
+
+        Mirrors the old "keep the email UNSEEN on SMTP failure" behavior:
+        the next poll re-fetches the message and re-sends the same draft.
+        """
+
+        email_row.imap_uid = None
+        email_row.imap_uidvalidity = None
 
     # ---------- test mode (sender whitelist) ----------
 
@@ -481,6 +626,11 @@ class IngestService:
             select(Email).where(Email.message_id == parsed.message_id)
         ).scalar_one_or_none()
         if existing is not None:
+            # A re-fetched message (SMTP retry) refreshes its server identity so
+            # a successful resend is not re-fetched forever; a still-failing
+            # resend clears it again below.
+            existing.imap_uid = parsed.uid
+            existing.imap_uidvalidity = parsed.uidvalidity
             resend_result = self._resend_failed_reply(existing)
             if resend_result is not None:
                 return resend_result
@@ -504,6 +654,8 @@ class IngestService:
             is_inbound=True,
             has_attachments=parsed.has_attachments,
             received_at=parsed.received_at,
+            imap_uid=parsed.uid,
+            imap_uidvalidity=parsed.uidvalidity,
         )
         self.db.add(email_row)
         self.db.flush()
@@ -973,6 +1125,9 @@ class IngestService:
                 reply.status = "failed"
                 reply.send_error = str(exc)
                 log_action(self.db, "reply_failed", "reply", reply.id)
+                # The mail must be re-fetched next poll so the same draft is
+                # retried (mirrors the old "keep UNSEEN on SMTP failure").
+                self._mark_for_retry(email_row)
                 self.db.commit()
                 return ProcessingResult(
                     message_id=parsed.message_id,
@@ -1065,6 +1220,8 @@ class IngestService:
         except SMTPError as exc:
             reply.send_error = str(exc)
             log_action(self.db, "reply_failed", "reply", reply.id)
+            # Still failing -> stay re-fetchable so the next poll retries again.
+            self._mark_for_retry(email_row)
             self.db.commit()
             return ProcessingResult(
                 message_id=email_row.message_id,
@@ -1214,7 +1371,10 @@ class IngestService:
                 summary[result.action] += 1
         for conversation_id, results in pending_groups.items():
             outcome, _keep_unseen_uid = self._send_aggregated_group(
-                conversation_id, results, remove_on_generation_failure=False
+                conversation_id,
+                results,
+                remove_on_generation_failure=False,
+                mark_for_retry_on_failure=False,
             )
             if outcome == "sent":
                 summary["auto_sent"] += 1
@@ -1287,6 +1447,7 @@ class IngestService:
         results: list[ProcessingResult],
         *,
         remove_on_generation_failure: bool = True,
+        mark_for_retry_on_failure: bool = True,
     ) -> tuple[str, str | None]:
         """Send ONE aggregated reply covering a conversation's pending batch.
 
@@ -1350,6 +1511,12 @@ class IngestService:
             reply.status = "failed"
             reply.send_error = str(exc)
             log_action(self.db, "reply_failed", "reply", reply.id)
+            # Only the newest mail is re-fetched for the retry; the older batch
+            # emails keep their persisted UID and are not fetched again. The
+            # resume-backlog caller disables this: it retries via the
+            # pending_after_pause flag instead, so IMAP must not re-fetch too.
+            if mark_for_retry_on_failure:
+                self._mark_for_retry(latest)
             self.db.commit()
             logger.error("Aggregated reply id=%s failed: %s", reply.id, exc)
             return "smtp_failed", latest_uid
@@ -1462,16 +1629,20 @@ class IngestService:
             pending_groups: dict[int, list[ProcessingResult]] = {}
             for uid, raw in items:
                 try:
-                    parsed = parse_email(raw, uid=uid)
+                    parsed = parse_email(
+                        raw, uid=uid, uidvalidity=self._current_uidvalidity
+                    )
                 except Exception as exc:  # noqa: BLE001 - one malformed mail must not stall the inbox
-                    logger.exception("Failed to parse email uid=%s; marking seen and skipping", uid)
+                    logger.exception("Failed to parse email uid=%s; skipping", uid)
                     log_action(self.db, "parse_failed", "email", 0, ip=None)
-                    self.mark_seen(conn, uid)
+                    # Record the UID so the malformed mail is never re-fetched,
+                    # without flagging it SEEN on the server.
+                    self._skip_uid(uid)
                     summary["failed"] += 1
                     continue
                 if self._is_gated(gate, parsed.from_email):
-                    # Test mode: the mail stays UNSEEN and untouched; it will be
-                    # re-fetched (and skipped again) until test mode is off.
+                    # Test mode: the mail stays untouched and is re-fetched (and
+                    # skipped again) until test mode is off.
                     summary["test_skipped"] += 1
                     continue
                 result = self.process_one(parsed, auto_send_mode="defer")
@@ -1482,35 +1653,18 @@ class IngestService:
                     continue
                 if result.action in summary:
                     summary[result.action] += 1
-                # Persisted emails are marked SEEN so they are not re-fetched.
-                # Paused emails are already ingested and re-routed from the DB
-                # backlog after resume; failed emails stay UNSEEN and retried.
-                if result.action in (
-                    "auto_sent",
-                    "reassured",
-                    "review",
-                    "manual",
-                    "silenced",
-                    "followup",
-                    "paused",
-                    "ad",
-                ):
-                    self.mark_seen(conn, uid)
+                # No server-side \Seen here: ingested mail is skipped next poll
+                # by its persisted imap_uid, and SMTP-failed mail has its UID
+                # cleared so it is re-fetched for a retry.
             # Phase 2: one aggregated reply per conversation (synchronous).
             for conversation_id, results in pending_groups.items():
-                outcome, keep_unseen_uid = self._send_aggregated_group(
+                outcome, _keep_unseen_uid = self._send_aggregated_group(
                     conversation_id, results
                 )
                 if outcome == "sent":
                     summary["auto_sent"] += 1
-                    for r in results:
-                        if r.uid:
-                            self.mark_seen(conn, r.uid)
                 elif outcome == "smtp_failed":
                     summary["failed"] += 1
-                    for r in results:
-                        if r.uid and r.uid != keep_unseen_uid:
-                            self.mark_seen(conn, r.uid)
                 else:  # generation_failed: batch removed, retry everything
                     summary["failed"] += 1
             record_imap_success()

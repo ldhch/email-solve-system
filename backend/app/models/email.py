@@ -43,6 +43,13 @@ class Email(Base):
     pending_after_pause: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, index=True
     )
+    # Server-side IMAP UID (with its UIDVALIDITY) of the fetched message. The
+    # poll records it so it can skip already-processed mail WITHOUT touching the
+    # mailbox's \Seen flag (webmail keeps the boss's unread state), and the
+    # boss's read in the admin is mirrored back with a STORE. Cleared while a
+    # reply is pending an SMTP retry, so that mail is re-fetched next poll.
+    imap_uid: Mapped[str | None] = mapped_column(String(64), index=True)
+    imap_uidvalidity: Mapped[str | None] = mapped_column(String(64))
     received_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
 
     conversation = relationship("Conversation", back_populates="emails")

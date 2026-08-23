@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_owner
@@ -25,6 +25,7 @@ from app.models.customer import Customer
 from app.models.email import Email
 from app.models.reply import Reply
 from app.models.ticket import Ticket
+from app.services.ingest import mark_seen_on_server
 
 router = APIRouter(prefix="/api/v1", tags=["inbox"])
 
@@ -182,6 +183,12 @@ def _conversation_rows(
                 continue
         if risk_level and risk != risk_level:
             continue
+        # 「无法判定」 is a to-do list, not an archive: the badge only counts
+        # unknown conversations that still carry unread mail, so it shrinks once
+        # the boss has looked at the unclassifiable item instead of growing
+        # forever.
+        if risk_level == "unknown" and unread == 0:
+            continue
         if status and latest_status != status:
             continue
         if conv_status and conv.status != conv_status:
@@ -267,6 +274,37 @@ async def list_inbox(
     return ok({"items": rows[start : start + size], "total": total, "page": page})
 
 
+@router.get("/inbox/counts")
+async def inbox_counts(
+    _user=Depends(require_owner),
+    db: Session = Depends(get_db),
+) -> dict:
+    """One request returns every inbox-tab badge count (M-15 inbox UX).
+
+    Each count reuses _conversation_rows with the tab's own filter params, so a
+    badge always matches exactly what that tab's list shows — no drift between
+    the red number and the rows below it. Declared before /inbox/{email_id} so
+    the literal "counts" path wins over the {email_id} path parameter.
+    """
+
+    return ok(
+        {
+            "pending_review": len(
+                _conversation_rows(db, risk_level=None, status="pending_review", keyword=None)
+            ),
+            "unknown": len(
+                _conversation_rows(db, risk_level="unknown", status=None, keyword=None)
+            ),
+            "high": len(
+                _conversation_rows(db, risk_level="high", status=None, keyword=None)
+            ),
+            "ad": len(
+                _conversation_rows(db, risk_level=None, status=None, keyword=None, ad_only=True)
+            ),
+        }
+    )
+
+
 @router.get("/inbox/unread-count")
 async def inbox_unread_count(
     _user=Depends(require_owner),
@@ -285,12 +323,16 @@ async def mark_email_read(
     email_id: int,
     _user=Depends(require_owner),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dependency),
 ) -> dict:
     email = db.get(Email, email_id)
     if email is None:
         raise HTTPException(status_code=404, detail="NOT_FOUND")
     email.is_read = True
     db.commit()
+    # Mirror the read to the mailbox so webmail unread state follows the boss.
+    if email.imap_uid:
+        mark_seen_on_server(settings, [email.imap_uid])
     return ok({"id": email.id, "is_read": True})
 
 
@@ -299,18 +341,24 @@ async def mark_conversation_read(
     conversation_id: int,
     _user=Depends(require_owner),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dependency),
 ) -> dict:
     """Mark every unread email in a conversation as read."""
 
     conv = db.get(Conversation, conversation_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="NOT_FOUND")
-    db.execute(
-        update(Email)
-        .where(Email.conversation_id == conversation_id, Email.is_read.is_(False))
-        .values(is_read=True)
-    )
+    unread = db.execute(
+        select(Email).where(
+            Email.conversation_id == conversation_id, Email.is_read.is_(False)
+        )
+    ).scalars().all()
+    uids = [e.imap_uid for e in unread if e.imap_uid]
+    for e in unread:
+        e.is_read = True
     db.commit()
+    # Mirror the read to the mailbox so webmail unread state follows the boss.
+    mark_seen_on_server(settings, uids)
     return ok({"id": conversation_id, "is_read": True})
 
 
