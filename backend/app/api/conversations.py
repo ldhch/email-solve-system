@@ -31,7 +31,7 @@ from app.services.audit import log_action, utcnow
 from app.services.conversation import normalize_subject
 from app.services.mailer import MailerService
 from app.services.replier import ReplierService
-from app.services.translator import TranslatorService
+from app.services.translator import TranslatorService, contains_cjk
 
 router = APIRouter(prefix="/api/v1", tags=["conversations"])
 
@@ -251,13 +251,25 @@ async def manual_reply(
     except LLMError:
         raise HTTPException(status_code=422, detail="LLM_FAILED") from None
 
+    # A pure-English manual reply passes through translate_to_letter unchanged,
+    # which would store the same English text in content_cn and break the
+    # CN/EN display toggle in the UI. Back-translate it so content_cn stays
+    # genuinely Chinese (non-fatal: on failure keep the original, sending is
+    # never blocked).
+    content_cn = payload.content_cn
+    if not contains_cjk(content_cn):
+        try:
+            content_cn = TranslatorService(llm).translate_to_chinese(content_en)
+        except LLMError:
+            content_cn = payload.content_cn
+
     reply = ReplierService(db, settings, llm).build_reply(
         latest,
         conv,
         content_en,
         reply_type="general",
         status="draft",
-        content_cn=payload.content_cn,
+        content_cn=content_cn,
     )
     reply.source = "manual"
     try:

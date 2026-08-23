@@ -16,6 +16,17 @@ logger = logging.getLogger(__name__)
 # Chinese reply..."). Pass such text through unchanged instead.
 _CJK_RE = re.compile(r"[一-鿿]")
 
+
+def contains_cjk(text: str) -> bool:
+    """True when text contains at least one CJK character.
+
+    Shared by the translator (pure-English manual replies pass through) and
+    the manual-reply API (which must keep content_cn genuinely Chinese so the
+    boss's CN/EN display toggle keeps working).
+    """
+
+    return bool(_CJK_RE.search(text))
+
 TRANSLATE_SYSTEM_PROMPT = """\
 You translate the store owner's Chinese reply into professional, polite,
 natural English for a customer-support email.
