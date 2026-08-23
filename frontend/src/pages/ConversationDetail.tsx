@@ -301,8 +301,6 @@ export default function ConversationDetail() {
         </div>
       )}
 
-      <PendingReviewCard items={data.timeline} onRefresh={load} />
-
       <Timeline
         items={data.timeline}
         showCn={showCn}
@@ -311,6 +309,10 @@ export default function ConversationDetail() {
       />
 
       <ReplyDraftEditor items={data.timeline} onChanged={load} />
+
+      {/* The pending-review card lives right above the manual reply box so
+          approving a draft and writing a follow-up happen in one place. */}
+      <PendingReviewCard items={data.timeline} onRefresh={load} />
 
       <div className="mt-4">
         {latestMsg && (
