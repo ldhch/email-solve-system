@@ -129,6 +129,14 @@ function sanitizeText(text: string): string {
     .join("\n");
 }
 
+// Detect an unmarked quoted header ("On …, <addr> wrote:" / "…写道：" with no
+// ">" prefix), which Yahoo/Gmail embed inline. chunkEmailText treats it (and
+// everything after it) as quoted history so embedded HTML/CSS never leaks into
+// the fresh body. This is part of quoted-history *stripping* and must stay.
+function isRoundHead(line: string): boolean {
+  return /写道：|wrote:/.test(line) && /@/.test(line);
+}
+
 function chunkEmailText(text: string): BodyChunk[] {
   const lines = sanitizeText(text).split("\n");
   const chunks: BodyChunk[] = [];
@@ -199,165 +207,11 @@ function Linkify({ text }: { text: string }) {
   return <>{nodes}</>;
 }
 
-// ---- Rebuild quoted history as a real message thread ----
-// Mail clients append the whole previous thread under the newest email. Each
-// round starts with a header line ("…写道：" in Chinese, "On … wrote:" in
-// English) that carries the sender and a timestamp, so we can split the quote
-// blob into per-sender messages, parse their times and sort them oldest-first.
-interface QuoteMsg {
-  fromEmail: string;
-  at: string;
-  content: string;
-}
-
-function isRoundHead(line: string): boolean {
-  return /写道：|wrote:/.test(line) && /@/.test(line);
-}
-
-const EMAIL_RE = /([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/;
-
-// Parse a header timestamp in any of the shapes we see in the wild: standard
-// Chinese "2026年8月18日晚上7:17", standard English "Aug 17, 2026 at 7:17 PM",
-// and Apple Mail's mixed "8月 18 2026, at 7:31 早上". Extract the year, month,
-// day and clock time, then normalize the AM/PM-ish marker.
-function parseAnyTime(s: string): number | null {
-  const yearM = s.match(/(20\d{2})/);
-  if (!yearM) return null;
-  const year = +yearM[1];
-
-  const months: Record<string, number> = {
-    jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
-    jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
-  };
-  let month: number | undefined;
-  const monthCn = s.match(/(\d{1,2})\s*月/);
-  const monthEn = s.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*/i);
-  if (monthCn) month = +monthCn[1];
-  else if (monthEn) month = months[monthEn[1].slice(0, 3).toLowerCase()];
-  if (!month || month < 1 || month > 12) return null;
-
-  const nums = [...s.matchAll(/(\d+)/g)].map((m) => +m[0]);
-  const day = nums.find(
-    (n) => n >= 1 && n <= 31 && n !== year && n !== month,
-  );
-  if (day == null) return null;
-
-  const timeM = s.match(/(\d{1,2})[:：](\d{1,2})/);
-  if (!timeM) return null;
-  let hour = +timeM[1];
-  const minute = +timeM[2];
-  if (/晚上|下午|傍晚|PM/i.test(s)) hour = hour === 12 ? 12 : hour + 12;
-  else if (/凌晨|上午|早上|AM/i.test(s)) hour = hour === 12 ? 0 : hour;
-
-  return new Date(year, month - 1, day, hour, minute).getTime();
-}
-
-function formatShortDate(d: Date): string {
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mi = String(d.getMinutes()).padStart(2, "0");
-  return `${mm}-${dd} ${hh}:${mi}`;
-}
-
-function parseRoundHead(line: string): { email: string; ts: number | null } {
-  const email = line.match(EMAIL_RE)?.[1] ?? "";
-  return { email, ts: parseAnyTime(line) };
-}
-
-// Unparseable headers show "—" (never dropped).
-function parseQuotedRounds(lines: QuoteLine[]): QuoteMsg[] {
-  // Gmail splits the quote header across two lines: "On …, addr <" followed
-  // by "addr> wrote:", and "On …, addr>" followed by a bare "wrote:". Rejoin
-  // such continuation lines first, otherwise the fragment "addr> wrote:" is
-  // mis-detected as a round head (it carries both "@" and "wrote:") and the
-  // customer's message bleeds into our previous reply.
-  const merged: QuoteLine[] = [];
-  for (const ql of lines) {
-    const last = merged[merged.length - 1];
-    if (
-      last &&
-      !isRoundHead(last.text) &&
-      /@/.test(last.text) &&
-      /(wrote:|写道：)/.test(ql.text) &&
-      (/<\s*$/.test(last.text) || /^\s*(wrote:|写道：)\s*$/.test(ql.text))
-    ) {
-      last.text = `${last.text} ${ql.text}`;
-    } else {
-      merged.push({ ...ql });
-    }
-  }
-
-  const rounds: QuoteMsg[] = [];
-  let cur: QuoteMsg | null = null;
-  for (const { text } of merged) {
-    if (isRoundHead(text)) {
-      if (cur) rounds.push(cur);
-      const { email, ts } = parseRoundHead(text);
-      cur = {
-        fromEmail: email,
-        at: ts != null ? formatShortDate(new Date(ts)) : "—",
-        content: "",
-      };
-    } else if (cur) {
-      cur.content += (cur.content ? "\n" : "") + text;
-    }
-  }
-  if (cur) rounds.push(cur);
-  // Quoted history is a reply chain: the newest quoted round appears first,
-  // the oldest last. Reversing that gives the true sending order, which is
-  // reliable across timezones — parsing each header's local timestamp would
-  // mix senders' timezones and misorder the thread.
-  return rounds.reverse();
-}
-
-// Embedded quoted replies (Yahoo/Gmail) carry the original HTML as plain
-// text: inline CSS prefixed with #yivNNN, @media rules and "|" grid lines.
-// Drop the debris before display, keeping the readable text.
-function stripCssDebris(content: string): string {
-  return content
-    .split("\n")
-    .filter((l) => {
-      const t = l.trim();
-      return !/#yiv\d+|@media|!important/.test(t) && !/^[|][\s|]*$/.test(t);
-    })
-    .map((l) => l.replace(/^\s*\|+\s*/, "").replace(/\s*\|+\s*$/, ""))
-    .join("\n");
-}
-
-// Protocol plain-text drops the original list bullets. Detect list blocks —
-// a line ending with ":" as the lead-in, followed by >=2 consecutive short
-// lines — and re-add "• " so long letters read like the mail client. The
-// rules are conservative: a blank line, an overlong line, or another ":"-
-// ending line stops the block, so ordinary paragraphs are never bulleted.
-function markListBullets(content: string): string {
-  const lines = content.split("\n");
-  const out: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (!/:$/.test(lines[i].trim())) {
-      out.push(lines[i]);
-      continue;
-    }
-    let j = i + 1;
-    while (j < lines.length) {
-      const t = lines[j].trim();
-      if (!t || t.length > 90 || /:$/.test(t)) break;
-      j++;
-    }
-    const count = j - (i + 1);
-    if (count >= 2) {
-      out.push(lines[i]);
-      for (let k = i + 1; k < j; k++) {
-        // Never double-bullet a line that already carries a marker.
-        out.push(/^[-*•]\s+/.test(lines[k].trim()) ? lines[k] : "• " + lines[k]);
-      }
-      i = j - 1;
-    } else {
-      out.push(lines[i]);
-    }
-  }
-  return out.join("\n");
-}
+// Quoted-history *stripping* lives in chunkEmailText / EmailBodyView (kept
+// untouched): a customer reply that quotes our Hostinger mail shows only its
+// fresh content. The full view no longer rebuilds message blocks from that
+// quoted copy — the「历史对话」fold draws from the authoritative DB timeline
+// instead, so a quoted reply never appears twice.
 
 // Summary mode shows the Chinese digest; if none was generated, fall back to
 // the freshest part of the body with quoted history stripped, so the boss
@@ -569,36 +423,6 @@ function MessageHeader({
   );
 }
 
-function HistoryBlock({
-  msg,
-  customerEmail,
-}: {
-  msg: QuoteMsg;
-  customerEmail?: string;
-}) {
-  const isCustomer = customerEmail
-    ? msg.fromEmail.toLowerCase() === customerEmail.toLowerCase()
-    : false;
-  const tone: Tone = isCustomer ? "email" : "system";
-  return (
-    <li>
-      <div className={`rounded-lg px-4 py-3 ${CARD_STYLE[tone]}`}>
-        <MessageHeader
-          label={isCustomer ? "客户来信" : "我方回复"}
-          tone={tone}
-          email={msg.fromEmail}
-          at={msg.at || "—"}
-        />
-        {msg.content && (
-          <div className="text-[15px] leading-[1.45] whitespace-pre-wrap text-ink">
-            {markListBullets(stripCssDebris(msg.content))}
-          </div>
-        )}
-      </div>
-    </li>
-  );
-}
-
 // A sent reply from our side (manual or AI): blue-tinted card with a
 // 「√ 已发送」status badge and its origin (人工 / 自动), so the boss can verify
 // what was actually sent without opening the mailbox. Drafts / pending-review
@@ -744,7 +568,6 @@ export function Timeline({
   if (!latest) return null;
 
   const id = latest.email_id!;
-  const fullText = fullCn[id] ?? latest.content_cn ?? latest.content ?? "";
   const latestAt = formatLocal(latest.at ?? null);
   // Attachments may belong to any email in the thread; show them all under the
   // freshest customer email so the boss sees the photos without digging.
@@ -798,14 +621,6 @@ export function Timeline({
     );
   }
 
-  // Full mode: rebuild the quoted history into a thread.
-  const displayText = showCn ? fullText : latest.content ?? "";
-  const chunks = chunkEmailText(normalizeSpacing(displayText));
-  const quoteLines = chunks
-    .filter((c): c is Extract<BodyChunk, { kind: "quote" }> => c.kind === "quote")
-    .flatMap((c) => c.lines);
-  const rounds = parseQuotedRounds(quoteLines);
-
   // The whole conversation as an interleaved message thread: every customer
   // email and our sent replies, ordered by time. Drafts / pending-review
   // replies stay with PendingReviewCard and ReplyDraftEditor.
@@ -817,9 +632,54 @@ export function Timeline({
     )
     .sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
 
+  // The full view keeps only the latest question-and-answer open — the newest
+  // customer email plus any replies sent after it — and folds everything older
+  // into the「历史对话」collapse. The fold draws from the authoritative DB
+  // timeline instead of re-parsing the freshest email's quoted copy, so when a
+  // customer reply quotes our Hostinger mail the same message never appears
+  // twice. (Quoted-history stripping inside the email body view is untouched.)
+  const latestEmailIdx = threadItems.reduce(
+    (idx, it, i) => (it.type === "email" ? i : idx),
+    -1,
+  );
+  const foldIdx = latestEmailIdx < 0 ? 0 : latestEmailIdx;
+  const historyItems = threadItems.slice(0, foldIdx);
+  const visibleItems = threadItems.slice(foldIdx);
+
+  const renderEmail = (item: TimelineItem, isLatest: boolean, keyPrefix: string) => (
+    <li key={`${keyPrefix}${item.email_id}`}>
+      <div className={`rounded-lg px-4 py-3 ${CARD_STYLE.email}`}>
+        <MessageHeader
+          label="客户来信"
+          tone="email"
+          email={customerEmail}
+          at={formatLocal(item.at ?? null)}
+        />
+        {showCn ? (
+          // Older emails fall back to their cached translation; only the
+          // latest one triggers the on-demand translate above.
+          <EmailBodyView
+            text={fullCn[item.email_id!] ?? (item.content_cn || item.content || "")}
+          />
+        ) : (
+          <EmailBodyView text={item.content ?? ""} />
+        )}
+        {isLatest && <AttachmentGrid items={attachments} />}
+        {isLatest && translating && !fullCn[id] && !latest.content_cn && (
+          <p className="mt-1.5 text-[12px] text-sub">
+            中文翻译生成中，先显示英文原文…
+          </p>
+        )}
+        {isLatest && translateError && (
+          <p className="mt-1 text-[12px] text-risk-high">{translateError}</p>
+        )}
+      </div>
+    </li>
+  );
+
   return (
     <ol className="space-y-3">
-      {rounds.length > 0 && (
+      {historyItems.length > 0 && (
         <li key="fold">
           <button
             onClick={() => setHistoryOpen((v) => !v)}
@@ -828,7 +688,7 @@ export function Timeline({
             <span className="font-medium text-accent">
               {historyOpen ? "▾" : "▸"}
             </span>
-            <span>历史对话（{rounds.length} 条消息）</span>
+            <span>历史对话（{historyItems.length} 条消息）</span>
             {!historyOpen && (
               <span className="font-medium text-accent">点击展开</span>
             )}
@@ -836,47 +696,24 @@ export function Timeline({
         </li>
       )}
       {historyOpen &&
-        rounds.map((r, i) => (
-          <HistoryBlock key={i} msg={r} customerEmail={customerEmail} />
-        ))}
-      {threadItems.map((item) => {
-        if (item.type === "email") {
-          const isLatest = item.email_id === latest?.email_id;
-          return (
-            <li key={`e-${item.email_id}`}>
-              <div className={`rounded-lg px-4 py-3 ${CARD_STYLE.email}`}>
-                <MessageHeader
-                  label="客户来信"
-                  tone="email"
-                  email={customerEmail}
-                  at={formatLocal(item.at ?? null)}
-                />
-                {showCn ? (
-                  // Older emails fall back to their cached translation; only
-                  // the latest one triggers the on-demand translate above.
-                  <EmailBodyView text={item.content_cn || item.content || ""} />
-                ) : (
-                  <EmailBodyView text={item.content ?? ""} />
-                )}
-                {isLatest && <AttachmentGrid items={attachments} />}
-                {isLatest && translating && !fullCn[id] && !latest.content_cn && (
-                  <p className="mt-1.5 text-[12px] text-sub">
-                    中文翻译生成中，先显示英文原文…
-                  </p>
-                )}
-                {isLatest && translateError && (
-                  <p className="mt-1 text-[12px] text-risk-high">{translateError}</p>
-                )}
-              </div>
-            </li>
-          );
-        }
-        return (
-          <li key={`r-${item.reply_id}`}>
-            <ReplyBlock item={item} showCn={showCn} />
-          </li>
-        );
-      })}
+        historyItems.map((item) =>
+          item.type === "email"
+            ? renderEmail(item, false, "he-")
+            : (
+                <li key={`hr-${item.reply_id}`}>
+                  <ReplyBlock item={item} showCn={showCn} />
+                </li>
+              ),
+        )}
+      {visibleItems.map((item) =>
+        item.type === "email"
+          ? renderEmail(item, item.email_id === latest?.email_id, "e-")
+          : (
+              <li key={`r-${item.reply_id}`}>
+                <ReplyBlock item={item} showCn={showCn} />
+              </li>
+            ),
+      )}
     </ol>
   );
 }
