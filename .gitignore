@@ -20,6 +20,10 @@ data/*
 !data/attachments/.gitkeep
 !data/exports/
 !data/exports/.gitkeep
+# Ingested customer attachments are runtime data (same as app.db): keep the
+# folder + .gitkeep tracked, never the files themselves.
+data/attachments/*
+!data/attachments/.gitkeep
 
 # Backend-local data dir must never be committed (secrets.bin could land here
 # from older path logic); keep it ignored even if it ever exists.
