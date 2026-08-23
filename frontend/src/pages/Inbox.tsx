@@ -102,6 +102,7 @@ export default function Inbox() {
   const [pendingCount, setPendingCount] = useState(0);
   const [unknownCount, setUnknownCount] = useState(0);
   const [adCount, setAdCount] = useState(0);
+  const [highCount, setHighCount] = useState(0);
   // Pending "block this sender" confirm target: the boss picks between blocking
   // the whole domain or just this one address from the expanded row.
   const [blockCandidate, setBlockCandidate] = useState<{
@@ -204,27 +205,25 @@ export default function Inbox() {
     pageRef.current = 1;
   }, [keyword]);
 
-  // Counts for the tab badges (待审核 / 无法判定 / 广告), independent of the
-  // active filter. Fetched together so the polling interval stays cheap.
+  // Counts for the tab badges (待审核 / 无法判定 / 高风险 / 广告), independent
+  // of the active filter. One aggregate request keeps the polling interval
+  // cheap and guarantees the badge matches the tab's own filtered list.
   const loadCounts = useCallback(async () => {
-    const fetchTotal = async (params: Record<string, string | number | boolean>) => {
-      try {
-        const resp = await http.get("/inbox", {
-          params: { ...params, size: 1 },
-        });
-        return dataOf<{ total: number }>(resp).total;
-      } catch {
-        return null; // keep the last known count
-      }
-    };
-    const [p, u, a] = await Promise.all([
-      fetchTotal({ status: "pending_review" }),
-      fetchTotal({ risk_level: "unknown" }),
-      fetchTotal({ ad: true }),
-    ]);
-    if (p != null) setPendingCount(p);
-    if (u != null) setUnknownCount(u);
-    if (a != null) setAdCount(a);
+    try {
+      const resp = await http.get("/inbox/counts");
+      const counts = dataOf<{
+        pending_review: number;
+        unknown: number;
+        ad: number;
+        high: number;
+      }>(resp);
+      setPendingCount(counts.pending_review);
+      setUnknownCount(counts.unknown);
+      setAdCount(counts.ad);
+      setHighCount(counts.high);
+    } catch {
+      // keep the last known counts on transient failures
+    }
   }, []);
 
   useEffect(() => {
@@ -399,6 +398,17 @@ export default function Inbox() {
                     }`}
                   >
                     {unknownCount}
+                  </span>
+                )}
+                {t.key === "high" && highCount > 0 && (
+                  <span
+                    className={`ml-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[11px] font-semibold tabular-nums ${
+                      filter === t.key
+                        ? "bg-white text-accent"
+                        : "bg-risk-high text-white"
+                    }`}
+                  >
+                    {highCount}
                   </span>
                 )}
                 {t.key === "ad" && adCount > 0 && (
