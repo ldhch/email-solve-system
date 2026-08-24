@@ -1,31 +1,9 @@
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { dataOf, http } from "../api/client";
+import { http } from "../api/client";
 
 export function Layout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const [unread, setUnread] = useState(0);
-
-  useEffect(() => {
-    let alive = true;
-    const fetchUnread = async () => {
-      try {
-        const resp = await http.get("/inbox/unread-count");
-        if (alive) setUnread(dataOf<{ unread: number }>(resp).unread);
-      } catch {
-        // keep the last known count
-      }
-    };
-    fetchUnread();
-    const timer = setInterval(fetchUnread, 15000);
-    const handleUnreadChanged = () => fetchUnread();
-    window.addEventListener("inbox:unread-changed", handleUnreadChanged);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-      window.removeEventListener("inbox:unread-changed", handleUnreadChanged);
-    };
-  }, []);
 
   async function logout() {
     try {
@@ -43,17 +21,21 @@ export function Layout({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen">
       <header className="bg-white border-b border-line">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-4">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-4">
             <span className="font-semibold text-accent tracking-tight">售后邮件后台</span>
             <nav className="flex gap-2">
               <NavLink to="/inbox" className={linkCls}>
                 收件箱
-                {unread > 0 && (
-                  <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded-full bg-risk-high text-white text-xs font-semibold">
-                    {unread}
-                  </span>
-                )}
+              </NavLink>
+              <NavLink to="/tickets" className={linkCls}>
+                工单
+              </NavLink>
+              <NavLink to="/blocked" className={linkCls}>
+                黑名单
+              </NavLink>
+              <NavLink to="/trash" className={linkCls}>
+                回收站
               </NavLink>
               <NavLink to="/templates" className={linkCls}>
                 快捷模板
@@ -66,6 +48,9 @@ export function Layout({ children }: { children: ReactNode }) {
               </NavLink>
               <NavLink to="/settings" className={linkCls}>
                 设置
+              </NavLink>
+              <NavLink to="/audit" className={linkCls}>
+                审计
               </NavLink>
             </nav>
           </div>

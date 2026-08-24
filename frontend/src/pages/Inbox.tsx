@@ -6,7 +6,7 @@ import { ReplyDraftEditor } from "../components/ReplyDraftEditor";
 import { ReplyEditor } from "../components/ReplyEditor";
 import { RiskTag } from "../components/RiskTag";
 import { Timeline, TimelineItem } from "../components/Timeline";
-import { formatLocal } from "../utils/format";
+import { formatFullLocal, formatLocal, formatSmartLocal } from "../utils/format";
 import { loadShowCn, saveShowCn } from "../utils/langPref";
 
 interface InboxItem {
@@ -21,6 +21,7 @@ interface InboxItem {
   summary_cn: string | null;
   latest_status: string | null;
   latest_at: string | null;
+  latest_kind?: "email" | "reply_sent" | "reply_pending";
   sla_deadline: string | null;
   sla_breached: boolean;
   sla_near: boolean;
@@ -37,7 +38,6 @@ interface ConversationData {
   is_ad?: boolean;
   retention_attempts: number;
   sla_deadline: string | null;
-  suggested_merge_conversation_id: number | null;
   open_tickets?: {
     id: number;
     status: string;
@@ -74,6 +74,25 @@ function Empty({ text }: { text: string }) {
   );
 }
 
+function ActivityTime({ item }: { item: InboxItem }) {
+  const kind = item.latest_kind ?? "email";
+  const arrow = kind === "reply_sent" ? "↑" : kind === "reply_pending" ? "✎" : "↓";
+  const className =
+    kind === "reply_sent"
+      ? "text-accent font-medium"
+      : kind === "reply_pending"
+        ? "text-[#B45309]"
+        : "text-ink";
+  return (
+    <span
+      className={`${className} ml-auto text-[11px] tabular-nums`}
+      title={formatFullLocal(item.latest_at)}
+    >
+      {arrow} {formatSmartLocal(item.latest_at)}
+    </span>
+  );
+}
+
 // Blue paperclip glyph used in the "图×N" attachment badge. An inline SVG (not
 // an emoji) so its stroke can be tinted with the accent color and scaled freely.
 function PaperclipIcon({ className }: { className?: string }) {
@@ -100,6 +119,7 @@ export default function Inbox() {
     "all" | "unread" | "pending_review" | "unknown" | "high" | "ad"
   >("all");
   const [pendingCount, setPendingCount] = useState(0);
+  const [unreadCount, setUnreadCount] = useState(0);
   const [unknownCount, setUnknownCount] = useState(0);
   const [adCount, setAdCount] = useState(0);
   const [highCount, setHighCount] = useState(0);
@@ -205,18 +225,20 @@ export default function Inbox() {
     pageRef.current = 1;
   }, [keyword]);
 
-  // Counts for the tab badges (待审核 / 无法判定 / 高风险 / 广告), independent
-  // of the active filter. One aggregate request keeps the polling interval
-  // cheap and guarantees the badge matches the tab's own filtered list.
+  // Counts for the tab badges (未读 / 待审核 / 无法判定 / 高风险 / 广告),
+  // independent of the active filter. One aggregate request keeps the polling
+  // interval cheap and guarantees the badge matches the tab's own filtered list.
   const loadCounts = useCallback(async () => {
     try {
       const resp = await http.get("/inbox/counts");
       const counts = dataOf<{
+        unread: number;
         pending_review: number;
         unknown: number;
         ad: number;
         high: number;
       }>(resp);
+      setUnreadCount(counts.unread);
       setPendingCount(counts.pending_review);
       setUnknownCount(counts.unknown);
       setAdCount(counts.ad);
@@ -378,6 +400,17 @@ export default function Inbox() {
                 }`}
               >
                 {t.label}
+                {t.key === "unread" && unreadCount > 0 && (
+                  <span
+                    className={`ml-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[11px] font-semibold tabular-nums ${
+                      filter === t.key
+                        ? "bg-white text-accent"
+                        : "bg-accent text-white"
+                    }`}
+                  >
+                    {unreadCount}
+                  </span>
+                )}
                 {t.key === "pending_review" && pendingCount > 0 && (
                   <span
                     className={`ml-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[11px] font-semibold tabular-nums ${
@@ -523,9 +556,7 @@ export default function Inbox() {
                           SLA 临期
                         </span>
                       )}
-                      <span className="ml-auto text-[11px] text-sub tabular-nums">
-                        {formatLocal(item.latest_at)}
-                      </span>
+                      <ActivityTime item={item} />
                     </div>
                   </button>
                   {item.is_ad && (

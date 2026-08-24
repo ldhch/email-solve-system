@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { dataOf, errorText, http } from "../api/client";
-import { formatLocal } from "../utils/format";
+import { formatFullLocal, formatLocal } from "../utils/format";
 
 export interface TimelineItem {
   type: "email" | "reply" | "attachment";
@@ -19,6 +19,7 @@ export interface TimelineItem {
   reply_type?: string;
   source?: string;
   low_confidence?: boolean;
+  send_error?: string | null;
   filename?: string;
   at?: string | null;
 }
@@ -398,11 +399,15 @@ function MessageHeader({
   tone,
   email,
   at,
+  fullAt,
+  direction,
 }: {
   label: string;
   tone: Tone;
   email?: string;
   at: string;
+  fullAt?: string;
+  direction?: "in" | "out";
 }) {
   return (
     <div className="mb-2 flex flex-wrap items-center gap-2 text-[11.5px] text-sub">
@@ -416,7 +421,11 @@ function MessageHeader({
           {email}
         </span>
       )}
-      <span className="ml-auto shrink-0 text-[13px] text-ink tabular-nums">
+      <span
+        className="ml-auto shrink-0 text-[13px] text-ink tabular-nums"
+        title={fullAt}
+      >
+        {direction === "in" ? "↓ " : direction === "out" ? "↑ " : ""}
         {at}
       </span>
     </div>
@@ -434,7 +443,13 @@ function ReplyBlock({ item, showCn }: { item: TimelineItem; showCn: boolean }) {
   const isManual = item.source === "manual";
   return (
     <div className={`rounded-lg px-4 py-3 ${CARD_STYLE.system}`}>
-      <MessageHeader label="我方回复" tone="system" at={formatLocal(item.at ?? null)} />
+      <MessageHeader
+        label="我方回复"
+        tone="system"
+        at={formatLocal(item.at ?? null)}
+        fullAt={formatFullLocal(item.at ?? null)}
+        direction="out"
+      />
       <div className="mb-2 flex flex-wrap items-center gap-2 text-[11.5px] text-sub">
         <span className="inline-flex items-center rounded bg-green-100 px-1.5 py-0.5 font-medium text-green-700">
           √ 已发送
@@ -592,6 +607,8 @@ export function Timeline({
               tone="email"
               email={customerEmail}
               at={latestAt}
+              fullAt={formatFullLocal(latest.at ?? null)}
+              direction="in"
             />
             <div className="text-[16px] leading-normal whitespace-pre-wrap text-ink">
               {latest.summary_cn || freshPreview(latest.content)}
@@ -606,6 +623,8 @@ export function Timeline({
                 label="我方已回复"
                 tone="system"
                 at={formatLocal(latestSent.at ?? null)}
+                fullAt={formatFullLocal(latestSent.at ?? null)}
+                direction="out"
               />
               <p className="text-[15px] leading-normal whitespace-pre-wrap text-ink line-clamp-3">
                 {(latestSent.content_cn ||
@@ -654,6 +673,8 @@ export function Timeline({
           tone="email"
           email={customerEmail}
           at={formatLocal(item.at ?? null)}
+          fullAt={formatFullLocal(item.at ?? null)}
+          direction="in"
         />
         {showCn ? (
           // Older emails fall back to their cached translation; only the

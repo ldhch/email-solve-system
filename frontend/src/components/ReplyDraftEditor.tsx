@@ -17,7 +17,9 @@ export function ReplyDraftEditor({
 
   const drafts = items.filter(
     (t): t is DraftItem =>
-      t.type === "reply" && t.status === "draft" && t.reply_id != null,
+      t.type === "reply" &&
+      (t.status === "draft" || t.status === "failed") &&
+      t.reply_id != null,
   );
 
   async function save(replyId: number) {
@@ -60,8 +62,15 @@ export function ReplyDraftEditor({
           className="bg-yellow-50 rounded-lg border border-yellow-200 p-4"
         >
           <h3 className="text-sm font-medium text-yellow-800 mb-2">
-            草稿（可编辑后发送）
+            {t.status === "failed"
+              ? "发送失败（可编辑后重试）"
+              : "草稿（可编辑后发送）"}
           </h3>
+          {t.send_error && (
+            <p className="mb-2 text-xs text-red-600 break-words">
+              失败原因：{t.send_error}
+            </p>
+          )}
           <textarea
             value={edits[t.reply_id] ?? t.content_cn ?? t.content_en}
             onChange={(e) =>
@@ -86,7 +95,7 @@ export function ReplyDraftEditor({
               disabled={busyId != null}
               className="px-3 py-1 bg-green-600 text-white rounded text-sm disabled:opacity-50"
             >
-              直接发送
+              {t.status === "failed" ? "重试发送" : "直接发送"}
             </button>
           </div>
         </div>

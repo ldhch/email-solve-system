@@ -5,12 +5,50 @@ import { Layout } from "../components/Layout";
 interface AuditItem {
   id: number;
   actor_id: number | null;
+  actor_name: string | null;
   action: string;
   resource_type: string;
   resource_id: number;
   ip: string | null;
   at: string;
 }
+
+const ACTION_LABEL: Record<string, string> = {
+  login: "登录",
+  logout: "退出登录",
+  login_failed: "登录失败",
+  pause: "暂停自动回复",
+  resume: "恢复自动回复",
+  test_mode_changed: "测试模式变更",
+  reply_sent: "回复已发送",
+  reply_approved: "审核通过",
+  reply_rejected: "驳回草稿",
+  reply_edited: "编辑回复",
+  reply_failed: "发送失败",
+  reply_deleted: "删除回复",
+  reply_restored: "恢复回复",
+  manual_reply_sent: "人工回复已发送",
+  ticket_created: "创建工单",
+  ticket_resolved: "解决工单",
+  ticket_updated: "更新工单",
+  ticket_deleted: "删除工单",
+  ticket_restored: "恢复工单",
+  sla_overdue: "SLA 逾期",
+  retention_auto_released: "自动放行退货",
+  ack_sent: "已发送回执",
+  ack_failed: "回执发送失败",
+  kb_uploaded: "知识库上传",
+  kb_deleted: "知识库删除",
+  qa_created: "新增问答",
+  qa_updated: "更新问答",
+  qa_deleted: "删除问答",
+  qa_bulk_import: "批量导入问答",
+  blocked_sender_created: "加入黑名单",
+  blocked_sender_deleted: "解除黑名单",
+  template_created: "新增模板",
+  template_updated: "更新模板",
+  template_deleted: "删除模板",
+};
 
 export default function AuditLogs() {
   const [items, setItems] = useState<AuditItem[]>([]);
@@ -142,11 +180,14 @@ export default function AuditLogs() {
                   <td className="px-4 py-2 text-gray-500">
                     {item.at.replace("T", " ").replace("Z", "")}
                   </td>
-                  <td className="px-4 py-2 font-medium">{item.action}</td>
+                  <td className="px-4 py-2 font-medium">
+                    {ACTION_LABEL[item.action] || item.action}
+                  </td>
                   <td className="px-4 py-2 text-gray-600">{item.resource_type}</td>
                   <td className="px-4 py-2 text-gray-600">{item.resource_id}</td>
                   <td className="px-4 py-2 text-gray-600">
-                    {item.actor_id === null ? "AI 自动" : `用户 #${item.actor_id}`}
+                    {item.actor_name ||
+                      (item.actor_id === null ? "AI 自动" : `用户 #${item.actor_id}`)}
                   </td>
                   <td className="px-4 py-2 text-gray-500">{item.ip || "—"}</td>
                 </tr>

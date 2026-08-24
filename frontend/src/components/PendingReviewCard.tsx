@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { errorText, http } from "../api/client";
-import { formatLocal } from "../utils/format";
+import { formatFullLocal, formatSmartLocal } from "../utils/format";
 import { TimelineItem } from "./Timeline";
 
 // Aggregates the conversation's pending-review replies into one actionable
@@ -35,6 +35,13 @@ export function PendingReviewCard({
   );
   if (!pending.length) return null;
 
+  function waitingHours(iso: string | null): number {
+    if (!iso) return 0;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return 0;
+    return Math.max(0, Math.floor((Date.now() - d.getTime()) / 3_600_000));
+  }
+
   async function act(replyId: number, approve: boolean) {
     setBusyId(replyId);
     setError("");
@@ -62,6 +69,22 @@ export function PendingReviewCard({
           const body = isEn
             ? t.content_en || t.content_cn || ""
             : t.content_cn || t.content_en || "";
+          const hours = waitingHours(t.at ?? null);
+          const autoReleases = t.reply_type === "retention_compensation";
+          const timeLabel =
+            hours >= 24
+              ? autoReleases
+                ? `已等待 ${hours}h · 超过24h将自动放行`
+                : `已等待 ${hours}h · 不会自动发送`
+              : hours >= 12
+                ? `已等待 ${hours}h`
+                : formatSmartLocal(t.at ?? null);
+          const timeClass =
+            hours >= 24
+              ? "bg-red-50 text-red-600"
+              : hours >= 12
+                ? "bg-amber-50 text-amber-700"
+                : "text-sub";
           return (
             <li
               key={t.reply_id}
@@ -84,8 +107,11 @@ export function PendingReviewCard({
                     人工
                   </span>
                 )}
-                <span className="ml-auto text-[11px] text-sub tabular-nums">
-                  {formatLocal(t.at ?? null)}
+                <span
+                  className={`ml-auto rounded px-1.5 py-0.5 text-[11px] tabular-nums ${timeClass}`}
+                  title={formatFullLocal(t.at ?? null)}
+                >
+                  {timeLabel}
                 </span>
               </div>
 
