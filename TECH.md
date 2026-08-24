@@ -693,7 +693,6 @@ NEGATIVE_KEYWORDS = [
   "subject": "Refund request",
   "customer": { "email": "customer@example.com", "display_name": "John" },
   "status": "escalated",
-  "suggested_merge_conversation_id": null,
   "timeline": [
     {
       "type": "email",
@@ -742,12 +741,6 @@ NEGATIVE_KEYWORDS = [
 
 #### `POST /api/v1/replies/{id}/restore`
 - **行为**：30 天内将已发邮件从回收站恢复；超期返回 `410 DELETED_EXPIRED`
-
-#### `POST /api/v1/conversations/{id}/split`
-- **Request**：`{ "at_email_id": 3 }`
-
-#### `POST /api/v1/conversations/{id}/merge`
-- **Request**：`{ "other_conversation_id": 5 }`
 
 #### `GET /api/v1/attachments/{id}`
 - **鉴权**：owner
@@ -1036,7 +1029,7 @@ shouhou-agent/
 | R4 | 邮件拉取丢信 | 90s 轮询 + Message-ID 去重 + 24h 内失败重拉 | Phase 1 固定 90s 轮询；IMAP IDLE 列入 P1，MVP 不做 |
 | R5 | SMTP 被识别垃圾邮件 | 单频限速 6封/小时 + SPF/DKIM/DMARC | 切换 Mailgun/Resend（不付费原则） |
 | R6 | Token 成本失控 | DeepSeek prompt cache + 会话最新6轮截断 | 换更小模型 / deepseek-reasoner（成本更低，ID 需实测） |
-| R7 | 会话合并误判 | 规范化主题完全相等优先 + difflib 相似度阈值 0.85 + 7d 窗口 + 老板后台「拆分/合并」入口 | P1 接 embedding 相似度后再定义阈值 |
+| R7 | 会话合并误判 | 规范化主题完全相等优先 + difflib 相似度阈值 0.85 + 7d 窗口（手动拆分/合并入口已按老板决定移除） | P1 接 embedding 相似度后再定义阈值 |
 | R8 | 浏览器兼容 | Vite + polyfill + 桌面端 only | 引入 Tailwind 组件 |
 
 ---

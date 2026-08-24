@@ -33,9 +33,10 @@ shouhou-agent/
 │   │   ├── config.py       # 全部配置来自 .env；运行期解密 secrets.bin
 │   │   ├── cli.py          # init-db / poll / run / pause / resume / create-owner / simulate / encrypt-secrets
 │   │   ├── core/security.py# bcrypt + JWT + Fernet 密钥加密（M-20）
-│   │   ├── api/            # auth / inbox / conversations / tickets / kb / qa-pairs / system / audit-logs
+│   │   ├── api/            # auth / inbox / conversations / tickets / kb / qa-pairs / system / audit-logs /
+│   │   │                   # blocked-senders / emails
 │   │   ├── services/       # ingest / conversation / classifier / replier / retention / knowledge / qa /
-│   │   │                   # translator / mailer / audit / alerting / scheduler
+│   │   │                   # translator / mailer / audit / alerting / scheduler / acknowledgment / blocked_senders
 │   │   └── models/         # customers / conversations / emails / replies / tickets / knowledge_docs /
 │   │                       # qa_pairs / users / audit_logs / system_state
 │   └── tests/              # 176 个 pytest 用例（含 PRD 异常场景 1-22 E2E）
@@ -45,7 +46,7 @@ shouhou-agent/
     ├── nginx-https.conf.example  # HTTPS + Let's Encrypt 模板
     └── src/
         ├── pages/          # Login / Inbox / Tickets / KnowledgeBase / QAPairs /
-        │                   # ConversationDetail / Settings / AuditLogs
+        │                   # ConversationDetail / Settings / AuditLogs / BlockedSenders / Trash
         └── components/     # RiskTag / Timeline / ReplyEditor / AuthGuard / Layout
 ```
 
@@ -85,6 +86,10 @@ Phase 4 新增可选配置：
 | `DATA_DIR` | 单一数据根（SQLite / 附件 / secrets.bin），默认 `data`（相对仓库根）；Docker 由 Compose 覆盖为 `/app/data` |
 | `SESSION_AUTO_CLOSE_DAYS` | 会话无活动 N 天后自动关闭（默认 30） |
 | `POLL_INTERVAL_SECONDS` | 定时拉取间隔（默认 90） |
+| `AUTO_SEND_MIN_CONFIDENCE` | 低风险自动发送的最低置信度（默认 0.8）；仅 `product_spec`/`usage`/`gratitude` 且达到该值才自动回 |
+| `LOW_CONFIDENCE_THRESHOLD` | 置信度低于该值直接降级 `unknown` 转人工（默认 0.6） |
+| `TRANSLATION_PREFILL_BATCH_SIZE` | 全文翻译 prefill 每轮最多预翻邮件数（默认 3） |
+| `TRANSLATION_PREFILL_CONCURRENCY` | 全文翻译 prefill 并发线程数（默认 3） |
 
 ### 3.3 生成 ENCRYPTION_KEY 并加密敏感字段（M-20）
 
@@ -167,11 +172,14 @@ LLM_PROVIDER=mock python -m app.cli simulate --reason quality --dry-run    # 质
 ### 4.3 中风险审核流 / 挽留闭环 / 紧急暂停 / 高风险+工单 / 知识库与 QA
 
 与 Phase 2/3 一致，详见各阶段说明：
-- 纯咨询（政策/保修/规格/用法）自动回复；发票/物流/改单转人工；`other` 中风险进「待审核」。
+- 自动回复边界（保守收紧）：仅 `product_spec`（规格）/`usage`（用法）/`gratitude`（感谢）且置信度 ≥ `AUTO_SEND_MIN_CONFIDENCE`（0.8）才自动回复；发票/物流/改单/退款一律转人工；中风险 `other` 进「待审核」；差评/法律/媒体/平台投诉/拒付强制转高风险。
+- 固定回执：需转人工 / 待审核 / 补偿挽留的邮件，系统先发一封固定英文回执（说明 1-2 个工作日内回复，不走 AI），同一会话只发一次，并建一张 medium 工单（SLA 按 2 个工作日计算）。
 - 退换货挽留：尺码→换货自动发；犹豫/买错→补偿草稿待审核；质量/损坏→照单退换；轮次超限→放行退货。
+- 待审核边界：只有「补偿挽留」草稿超过 24h 会告警并按客户原退货请求自动放行；其他普通待审核/转人工草稿不会自动发送。
 - 紧急暂停：后台「设置」页一键暂停/恢复（或 `python -m app.cli pause/resume`）。
 - 高风险：安抚信（承诺 24h 专人回复、不承诺赔偿）+ 自动建单（SLA=收件+24h，24×7）；同会话追问合并进原工单，不重复发安抚信。
 - 知识库：上传 PDF/DOCX/MD（≤20MB）全文注入；标准 QA：命中直出标准答案。
+- 收件箱「未读」页签显示未读会话角标；同一会话有多封未读时页签按会话数统计，会话详情内会显示具体未读封数。
 
 ### 4.4 Phase 4 新增验证
 
@@ -181,6 +189,25 @@ LLM_PROVIDER=mock python -m app.cli simulate --reason quality --dry-run    # 质
 4. **密钥加密**：见 3.3，`encrypt-secrets` 后重启服务，日志无解密报错即说明运行期解密生效。
 5. **设置页**：暂停开关、告警通道只读状态、审计日志入口。
 
+### 4.5 测试模式 / 白名单 / 新页面（第二轮新增）
+
+1. **测试模式 + 发件人白名单**：`PUT /api/v1/system/test-mode`（body `{"enabled": true, "whitelist": ["you@test.com"]}`）开启后，只处理白名单内发件人，其余邮件被跳过且**不落库**（保持服务器未读，退出测试模式后正常处理）；空白名单 = 全隔离。当前状态用 `GET /api/v1/system/status` 查看（含 `ai_paused`）。验收期建议「暂停 + 白名单」组合：收件照常入库可见、但不自动回复。
+2. **新页面**：导航新增「工单」「黑名单」「回收站」「审计日志」——工单（含回收站与恢复）、黑名单（增删）、回收站（软删的回复/工单）、审计日志（筛选+分页）。
+3. **失败回复重试**：会话详情里失败的回复可查看错误原因，编辑后点发送重试（`PUT /replies/{id}` 编辑 + `POST /replies/{id}/send`）。
+4. **时间展示**：收件箱固定 UTC+8，相对时间 + hover 完整时间；`↓ 来信 / ↑ 回信 / ✎ 草稿待审核` 标记；待审草稿超过 12h 橙色、超过 24h 红色。
+
+### 4.6 全文翻译接口真实链路（上线前必测）
+
+`test_emails_api.py` 在本机测试环境会卡住（anyio 同步翻译基础设施问题），翻译接口须用**真实邮件**实测一次：
+
+1. 后台处于「已暂停但未开启测试模式」（`GET /api/v1/system/status` → `test_mode:false`、`ai_paused:true`），用外部邮箱向客服邮箱发一封英文邮件。
+2. 等 1-2 个轮询（90s）后，收件箱应出现该邮件（暂停下照常入库、不自动回）。
+3. 登录后台打开该会话，点「全文翻译」：
+   - 未缓存时先出英文，数秒到数十秒后自动替换为中文（前端轮询 `GET /api/v1/emails/{id}/translate/status`）；
+   - 再次点击直接出缓存中文（`POST /api/v1/emails/{id}/translate` 幂等）。
+4. **实测「未缓存走 LLM」路径**：prefill 每 90s 会自动缓存新邮件，抢在它之前点有竞争；要确定性实测，临时把 `.env` 的 `TRANSLATION_PREFILL_BATCH_SIZE=0` 重启后端（prefill 停掉），发新邮件后点「全文」，看中文是否在数秒~数十秒出现，测完恢复配置重启。
+5. 若长时间不出中文：确认 `.env` 的 `LLM_PROVIDER`/`LLM_BASE_URL`/`DEEPSEEK_API_KEY` 正确，查看 `/tmp/shouhou-backend.log` 是否有 `LLM_FAILED`（422）或超时。
+
 ## 5. 运行测试
 
 ```bash
@@ -188,7 +215,7 @@ cd backend
 python -m pytest
 ```
 
-当前结果：**176 passed**（Phase 1-3 全部用例 + 告警通道/升级、调度 job、审计查询 API、Fernet 加密回退、healthz、PRD 异常场景 1-22 E2E）。
+当前结果：**261 passed**（Phase 1-3 全部用例 + 告警/调度/审计/加密回退/healthz/PRD 异常场景 E2E + 测试模式白名单/固定回执/翻译状态/并发 prefill 等新增用例）。注：`test_emails_api.py` 在本机测试环境会卡住（anyio 同步翻译基础设施问题，与业务改动无关），验证时用 `pytest --ignore=tests/test_emails_api.py`，翻译接口上线前用真实邮件实测（见 4.6）。
 
 ## 6. Docker 生产部署
 

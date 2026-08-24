@@ -4,6 +4,23 @@
 > 范围：TECH.md 第九章 Phase 4（M-18 告警 + M-17 审计增强 + M-12 APScheduler + M-20 密钥加密 + F-09 设置页 + E2E 异常场景 1-22 + Docker/Nginx 部署）
 > Phase 3 遗留的 4 个待确认问题（知识库文档规模 / QA 命中判定 / QA 上限 100 条 / 未确认标注文案）不阻塞本阶段，继续列入文末待确认清单。
 
+## 收尾调整（2026-08-24）
+
+- 自动放行边界已明确：仅 `retention_compensation` 待审核草稿超过 24h 会告警并自动放行退货；普通 `pending_review` / 转人工草稿不会自动发送。前端待审卡片文案已区分。
+- 收件箱「未读」页签补上未读会话角标；`GET /api/v1/inbox/counts` 新增 `unread`。导航不显示未读角标；`GET /api/v1/inbox/unread-count` 仍保留 `unread` / `unread_emails` / `unread_conversations` 兼容字段。
+- 手动「拆分会话 / 合并会话」前后端入口与接口已按老板决定移除；自动会话合并引擎保留，系统仍按邮件头 / 主题 / 7 天窗口自动归并。
+
+## 收尾调整（2026-08-24 · 第二轮：测试模式 + 固定回执 + 风险收紧 + 后台补齐）
+
+- **测试模式 + 发件人白名单**（SystemState 持久化）：`test_mode=true` 时只处理白名单 `test_whitelist` 内发件人，空白名单 = 全隔离。被挡掉的邮件**不落库、保持服务器 UNSEEN**，每轮轮询重复跳过，退出测试模式后按正常链路重跑（`ingest.py` `_is_gated`）。开关：`PUT /api/v1/system/test-mode`（`{enabled, whitelist}`）；`GET /api/v1/system/status` 返回当前 `test_mode` / `test_whitelist` / `ai_paused`。
+- **暂停（ai_paused）语义与测试模式不同**：暂停只禁止回复与发送，收件仍解析落库（`pending_after_pause=true`，收件箱可见），恢复后按到达顺序重路由（`_process_pending_after_pause`）；测试模式是「不落库」的隔离。生产验收期建议用「暂停 + 白名单」组合，既能看邮件又不自动回。
+- **固定回执（acknowledgment，`services/acknowledgment.py`）**：转人工 / 待审核 / 补偿挽留的邮件发送固定英文回执（不走 LLM），同一会话只发一次；同时创建 medium 工单，SLA = 收件时间 + 2 个工作日（`business_days_from`，跳过周末）。发送失败（`ack_failed`）不影响审核，仍保证工单建立；成功发送后真正的人工回复会 `resolve` 该工单。
+- **LLM 自动发送风险收紧**：`classifier.resolve_action` 收敛为——仅 `product_spec` / `usage` / `gratitude` 且置信度 ≥ `auto_send_min_confidence`（默认 0.8）可自动发送；medium 一律 review（物流 `logistics_inquiry` / 改单 `order_modification` / 发票 `invoice` / 退款 `refund_request` 仍 escalate）；high / unknown 一律 escalate（差评、法律、媒体、平台投诉、拒付等强制 high）。`AUTO_SEND_MIN_CONFIDENCE` / `LOW_CONFIDENCE_THRESHOLD` 走 .env。
+- **翻译 prefill 并发 + 状态轮询**：`translation_prefill_batch_size`（默认 3）与 `translation_prefill_concurrency`（默认 3）；LLM 并发翻译、主线程串行落库（不锁 SQLite）。新增只读 `GET /api/v1/emails/{id}/translate/status`（`done` / `pending`），前端「全文」未缓存时先出英文、轮询到中文后自动替换。
+- **后台体验补齐**：新增工单页（`GET /api/v1/tickets`、回收站 `/tickets/trash` + 恢复）、黑名单页（`/api/v1/blocked-senders` 增删查）、回收站页（回复 `/replies/trash` + 工单）、审计页；失败回复可在详情查看 `send_error`、编辑（`PUT /replies/{id}`）后重试发送（`POST /replies/{id}/send`）。
+- **时间展示优化**：收件箱固定 UTC+8、相对时间 + hover 完整时间、`↓ 来信 / ↑ 回信 / ✎ 草稿待审核` 标记；待审草稿 >12h 橙色、>24h 红色。
+- **本轮涉及文件**：`services/{acknowledgment,ingest,classifier,scheduler}.py`、`api/{inbox,conversations,audit,blocked_senders,tickets}.py`、`frontend/src/pages/{Tickets,BlockedSenders,Trash,AuditLogs}.tsx`、`frontend/src/components/{Timeline,PendingReviewCard,ReplyDraftEditor,Layout}.tsx`。
+
 ## 🔧 Review 修复（2026-08-17，5 项）
 
 | # | 问题 | 修复 | 状态 |
@@ -38,8 +55,8 @@
 | M-12 | `GET /api/v1/healthz` 增强：`{db, scheduler, uptime_sec}`，DB 或 scheduler 心跳超 60s（N-4）时返回 503，供 Docker healthcheck | ✅ |
 | M-20 | `core/security.py`：Fernet 加解密 + `data/secrets.bin` 读写（0600 权限）；`config.py` 运行期 `get_settings()` 检测到 secrets.bin 存在则解密覆盖 SECRET_FIELDS（EMAIL_PASSWORD / DEEPSEEK_API_KEY / OPENAI_API_KEY / SECRET_KEY / AGENT_SERVICE_TOKEN），文件缺失/密钥为空/解密失败均回退 .env；`python -m app.cli encrypt-secrets [--file]` 不删除 .env 明文。2026-08-17 补：secrets 路径经 `DATA_DIR` 单一数据根派生，容器内为 `/app/data/secrets.bin`（卷内），本地为仓库根 `data/secrets.bin`，与 app.db 同目录 | ✅ |
 | F-09 | 前端设置页：暂停/恢复开关（复用 /system/pause|resume）、通知设置只读展示（新增 `GET /api/v1/system/notifications`，只返回是否配置 + 脱敏邮箱）、审计日志入口；导航挂「设置」「审计日志」（收件箱/工单/知识库/标准问答/设置/审计日志） | ✅ |
-| 行为补缺 | PRD 异常场景 6（空/纯图片正文 → unknown 转人工 + 标记可疑，不回自动回复）、8（同会话高风险追问合并进原工单，不重复发安抚信/不重复建单，审计 high_risk_followup）、9（客户要求不再联系 → silenced_until=now+72h，审计 silenced_set）、15（同 display_name 不同邮箱 → conversation 详情返回 suggested_merge_conversation_id 供老板决策） | ✅ |
-| E2E | PRD 异常场景 1-22 全覆盖（tests/test_e2e_exceptions.py，25 个用例），复用 FakeSMTP/FakeIMAP/MockLLM + httpx ASGITransport，无浏览器/真实网络 | ✅ |
+| 行为补缺 | PRD 异常场景 6（空/纯图片正文 → unknown 转人工 + 标记可疑，不回自动回复）、8（同会话高风险追问合并进原工单，不重复发安抚信/不重复建单，审计 high_risk_followup）、9（客户要求不再联系 → silenced_until=now+72h，审计 silenced_set）；场景 15/18 的手动合并/拆分已按老板决定移除 | ✅ |
+| E2E | PRD 异常场景 1-22 覆盖（15/18 手动合并/拆分已移除，其余场景保留），复用 FakeSMTP/FakeIMAP/MockLLM + httpx ASGITransport，无浏览器/真实网络 | ✅ |
 | 部署 | backend/Dockerfile（Python 3.11 slim + uvicorn，非 root appuser，data/ 卷）、frontend/Dockerfile（Node 构建 → Nginx）、docker-compose.yml（backend+frontend+appdata 卷，restart:always，healthcheck 用 /api/v1/healthz，certbot 可选 profile）、nginx.conf（HTTP 开箱即用，同域反代无 CORS）+ nginx-https.conf.example（Let's Encrypt 模板） | ✅ |
 | 依赖 | pyproject 新增 `apscheduler>=3.10,<4`、`cryptography>=42.0`（已安装 apscheduler 3.11.3 / cryptography 50.0.0） | ✅ |
 | 文档 | README 重写：本地启动、ENCRYPTION_KEY 生成 + encrypt-secrets、.env 新配置、healthcheck、本地 Compose 与生产 HTTPS 两套部署步骤 | ✅ |
