@@ -43,7 +43,6 @@ def _latest_reply_per_conversation(db: Session) -> dict[int, Reply]:
 
     rows = db.execute(
         select(Reply.conversation_id, func.max(Reply.id).label("max_id"))
-        .where(Reply.is_deleted.is_(False))
         .group_by(Reply.conversation_id)
     ).all()
     if not rows:
@@ -58,7 +57,7 @@ def _latest_sla_deadline_per_conversation(db: Session) -> dict[int, datetime]:
 
     rows = db.execute(
         select(Ticket.conversation_id, func.max(Ticket.sla_deadline))
-        .where(Ticket.is_deleted.is_(False), Ticket.status != "resolved")
+        .where(Ticket.status != "resolved")
         .group_by(Ticket.conversation_id)
     ).all()
     return {conversation_id: deadline for conversation_id, deadline in rows}
@@ -74,6 +73,7 @@ def _conversation_rows(
     conv_status: str | None = None,
     unread_only: bool = False,
     ad_only: bool = False,
+    archived_only: bool = False,
 ) -> list[dict]:
     """Fold emails into one row per conversation.
 
@@ -136,6 +136,13 @@ def _conversation_rows(
         if ad_only and not is_ad_conv:
             continue
         if not ad_only and is_ad_conv:
+            continue
+
+        # Archived conversations only surface on the「已归档」tab; every other
+        # view hides them so the inbox stays focused on active threads.
+        if archived_only and not conv.is_archived:
+            continue
+        if not archived_only and conv.is_archived:
             continue
 
         # Highest risk seen in the thread wins, so an early high-risk email is
@@ -254,6 +261,7 @@ async def list_inbox(
     conv_status: str | None = Query(default=None),
     unread_only: bool = Query(default=False),
     ad: bool = Query(default=False),
+    archived: bool = Query(default=False),
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=100),
     keyword: str | None = Query(default=None),
@@ -271,6 +279,7 @@ async def list_inbox(
         conv_status=conv_status,
         unread_only=unread_only,
         ad_only=ad,
+        archived_only=archived,
     )
     total = len(rows)
     start = (page - 1) * size
@@ -306,6 +315,9 @@ async def inbox_counts(
             ),
             "ad": len(
                 _conversation_rows(db, risk_level=None, status=None, keyword=None, ad_only=True)
+            ),
+            "archived": len(
+                _conversation_rows(db, risk_level=None, status=None, keyword=None, archived_only=True)
             ),
         }
     )

@@ -6,8 +6,6 @@ high-risk emails is Phase 3.
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -41,7 +39,7 @@ async def list_tickets(
     db: Session = Depends(get_db),
 ) -> dict:
     now = utcnow()
-    filters = [Ticket.is_deleted.is_(False)]
+    filters: list = []
     if status and status != "all":
         filters.append(Ticket.status == status)
     tickets = db.execute(
@@ -102,83 +100,3 @@ async def update_ticket(
             "resolved_at": _fmt(ticket.resolved_at),
         }
     )
-
-
-@router.delete("/tickets/{ticket_id}")
-async def soft_delete_ticket(
-    ticket_id: int,
-    request: Request,
-    user=Depends(require_owner),
-    db: Session = Depends(get_db),
-) -> dict:
-    ticket = db.get(Ticket, ticket_id)
-    if ticket is None:
-        raise HTTPException(status_code=404, detail="NOT_FOUND")
-    if ticket.is_deleted:
-        raise HTTPException(status_code=409, detail="ALREADY_DELETED")
-    ticket.is_deleted = True
-    log_action(
-        db,
-        "ticket_deleted",
-        "ticket",
-        ticket.id,
-        actor_id=user.id,
-        ip=_ip(request),
-        commit=False,
-    )
-    db.commit()
-    return ok({"ticket_id": ticket.id})
-
-
-@router.get("/tickets/trash")
-async def ticket_trash(
-    page: int = Query(default=1, ge=1),
-    size: int = Query(default=20, ge=1, le=100),
-    _user=Depends(require_owner),
-    db: Session = Depends(get_db),
-) -> dict:
-    tickets = db.execute(
-        select(Ticket)
-        .where(Ticket.is_deleted.is_(True))
-        .order_by(Ticket.created_at.desc())
-    ).scalars().all()
-    total = len(tickets)
-    items = [
-        {
-            "id": t.id,
-            "conversation_id": t.conversation_id,
-            "summary_cn": t.summary_cn,
-            "status": t.status,
-            "created_at": _fmt(t.created_at),
-        }
-        for t in tickets[(page - 1) * size : (page - 1) * size + size]
-    ]
-    return ok({"items": items, "total": total, "page": page})
-
-
-@router.post("/tickets/{ticket_id}/restore")
-async def restore_ticket(
-    ticket_id: int,
-    request: Request,
-    user=Depends(require_owner),
-    db: Session = Depends(get_db),
-) -> dict:
-    ticket = db.get(Ticket, ticket_id)
-    if ticket is None:
-        raise HTTPException(status_code=404, detail="NOT_FOUND")
-    if not ticket.is_deleted:
-        raise HTTPException(status_code=409, detail="NOT_DELETED")
-    if utcnow() - ticket.created_at > timedelta(days=30):
-        raise HTTPException(status_code=410, detail="DELETED_EXPIRED")
-    ticket.is_deleted = False
-    log_action(
-        db,
-        "ticket_restored",
-        "ticket",
-        ticket.id,
-        actor_id=user.id,
-        ip=_ip(request),
-        commit=False,
-    )
-    db.commit()
-    return ok({"ticket_id": ticket.id})

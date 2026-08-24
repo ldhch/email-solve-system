@@ -67,7 +67,6 @@ def resolve_review_tickets(
     open_tickets = db.execute(
         select(Ticket).where(
             Ticket.conversation_id == conversation_id,
-            Ticket.is_deleted.is_(False),
             Ticket.status.in_(("pending", "in_progress")),
             Ticket.risk_level != "high",
         )
@@ -152,7 +151,6 @@ class AcknowledgmentService:
             select(Ticket.id)
             .where(
                 Ticket.conversation_id == conversation.id,
-                Ticket.is_deleted.is_(False),
                 Ticket.status.in_(("pending", "in_progress")),
                 Ticket.risk_level != "high",
             )

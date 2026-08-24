@@ -36,7 +36,6 @@ class Reply(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
     send_error: Mapped[str | None] = mapped_column(Text)
-    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     conversation = relationship("Conversation", back_populates="replies")
     email = relationship("Email", back_populates="replies")

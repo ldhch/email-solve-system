@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -23,6 +23,10 @@ class Conversation(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     risk_level: Mapped[str | None] = mapped_column(String(20), index=True)
     retention_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # True when the boss archived the conversation (set aside from the inbox,
+    # visible under the「已归档」tab). New inbound mail auto-clears it so a
+    # customer reply surfaces back in the inbox.
+    is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 
     customer = relationship("Customer", back_populates="conversations")
     emails = relationship("Email", back_populates="conversation")

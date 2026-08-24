@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -46,7 +44,7 @@ def _make_mailer(db: Session, settings: Settings) -> MailerService:
 
 
 def _conversation_status(conv: Conversation) -> str:
-    tickets = [t for t in conv.tickets if not t.is_deleted]
+    tickets = list(conv.tickets)
     if tickets and all(t.status == "resolved" for t in tickets):
         return "resolved"
     if any(t.status in ("pending", "in_progress") for t in tickets):
@@ -89,7 +87,7 @@ async def conversation_detail(
     ).scalars().all()
     replies = db.execute(
         select(Reply)
-        .where(Reply.conversation_id == conv.id, Reply.is_deleted.is_(False))
+        .where(Reply.conversation_id == conv.id)
         .order_by(Reply.created_at)
     ).scalars().all()
     email_ids = [e.id for e in emails]
@@ -147,11 +145,11 @@ async def conversation_detail(
         )
     timeline.sort(key=lambda item: item["at"] or "")
 
-    open_tickets = [t for t in conv.tickets if not t.is_deleted and t.status != "resolved"]
+    open_tickets = [t for t in conv.tickets if t.status != "resolved"]
     sla_deadline = max((t.sla_deadline for t in open_tickets), default=None)
     now = utcnow()
     resolved_ticket_count = sum(
-        1 for t in conv.tickets if not t.is_deleted and t.status == "resolved"
+        1 for t in conv.tickets if t.status == "resolved"
     )
 
     return ok(
@@ -165,6 +163,7 @@ async def conversation_detail(
             "status": _conversation_status(conv),
             "risk_level": conv.risk_level,
             "is_ad": any(e.is_ad for e in emails if e is not None),
+            "is_archived": conv.is_archived,
             "retention_attempts": conv.retention_attempts,
             "sla_deadline": _fmt(sla_deadline),
             # Ticket state for the merged ticket bar: open high-risk tickets
@@ -184,6 +183,58 @@ async def conversation_detail(
             "timeline": timeline,
         }
     )
+
+
+def _set_archived(
+    db: Session,
+    conversation_id: int,
+    archived: bool,
+    user,
+    request: Request,
+) -> dict:
+    """Toggle a conversation's archive flag with an audit trail."""
+
+    conv = db.get(Conversation, conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="NOT_FOUND")
+    if conv.is_archived == archived:
+        return ok({"conversation_id": conv.id, "is_archived": conv.is_archived})
+    conv.is_archived = archived
+    log_action(
+        db,
+        "conversation_archived" if archived else "conversation_unarchived",
+        "conversation",
+        conv.id,
+        actor_id=user.id,
+        ip=_ip(request),
+        commit=False,
+    )
+    db.commit()
+    return ok({"conversation_id": conv.id, "is_archived": conv.is_archived})
+
+
+@router.post("/conversations/{conversation_id}/archive")
+async def archive_conversation(
+    conversation_id: int,
+    request: Request,
+    user=Depends(require_owner),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Hide the conversation from the inbox (still reachable under 已归档)."""
+
+    return _set_archived(db, conversation_id, True, user, request)
+
+
+@router.post("/conversations/{conversation_id}/unarchive")
+async def unarchive_conversation(
+    conversation_id: int,
+    request: Request,
+    user=Depends(require_owner),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Bring an archived conversation back into the inbox."""
+
+    return _set_archived(db, conversation_id, False, user, request)
 
 
 @router.post("/conversations/{conversation_id}/reply")
@@ -269,7 +320,6 @@ async def manual_reply(
     open_tickets = db.execute(
         select(Ticket).where(
             Ticket.conversation_id == conv.id,
-            Ticket.is_deleted.is_(False),
             Ticket.status.in_(("pending", "in_progress")),
         )
     ).scalars().all()
@@ -525,86 +575,3 @@ async def send_draft(
     )
     db.commit()
     return ok({"reply_id": reply.id, "sent_at": _fmt(reply.sent_at)})
-
-
-@router.delete("/replies/{reply_id}")
-async def soft_delete_reply(
-    reply_id: int,
-    request: Request,
-    user=Depends(require_owner),
-    db: Session = Depends(get_db),
-) -> dict:
-    reply = db.get(Reply, reply_id)
-    if reply is None:
-        raise HTTPException(status_code=404, detail="NOT_FOUND")
-    if reply.is_deleted:
-        raise HTTPException(status_code=409, detail="ALREADY_DELETED")
-    reply.is_deleted = True
-    log_action(
-        db,
-        "reply_deleted",
-        "reply",
-        reply.id,
-        actor_id=user.id,
-        ip=_ip(request),
-        commit=False,
-    )
-    db.commit()
-    return ok({"reply_id": reply.id})
-
-
-@router.get("/replies/trash")
-async def reply_trash(
-    page: int = Query(default=1, ge=1),
-    size: int = Query(default=20, ge=1, le=100),
-    _user=Depends(require_owner),
-    db: Session = Depends(get_db),
-) -> dict:
-    base = select(Reply).where(Reply.is_deleted.is_(True))
-    total = len(db.execute(base).scalars().all())
-    replies = db.execute(
-        base.order_by(Reply.created_at.desc())
-        .offset((page - 1) * size)
-        .limit(size)
-    ).scalars().all()
-    items = [
-        {
-            "id": r.id,
-            "conversation_id": r.conversation_id,
-            "email_id": r.email_id,
-            "subject": (db.get(Email, r.email_id).subject if r.email_id else None),
-            "content_en": r.content_en,
-            "reply_type": r.reply_type,
-            "created_at": _fmt(r.created_at),
-        }
-        for r in replies
-    ]
-    return ok({"items": items, "total": total, "page": page})
-
-
-@router.post("/replies/{reply_id}/restore")
-async def restore_reply(
-    reply_id: int,
-    request: Request,
-    user=Depends(require_owner),
-    db: Session = Depends(get_db),
-) -> dict:
-    reply = db.get(Reply, reply_id)
-    if reply is None:
-        raise HTTPException(status_code=404, detail="NOT_FOUND")
-    if not reply.is_deleted:
-        raise HTTPException(status_code=409, detail="NOT_DELETED")
-    if utcnow() - reply.created_at > timedelta(days=30):
-        raise HTTPException(status_code=410, detail="DELETED_EXPIRED")
-    reply.is_deleted = False
-    log_action(
-        db,
-        "reply_restored",
-        "reply",
-        reply.id,
-        actor_id=user.id,
-        ip=_ip(request),
-        commit=False,
-    )
-    db.commit()
-    return ok({"reply_id": reply.id})

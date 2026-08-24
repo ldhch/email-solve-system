@@ -179,7 +179,7 @@ flowchart TD
 | M-12 | `services/scheduler.py` | APScheduler：① 定时触发 IngestService 拉新邮件（每 90s）② 周期清理超窗会话 + 30d 自动关闭 ③ 扫描 SLA 逾期工单并告警 ④ 扫描补偿挽留待审核超时并告警/放行退货 ⑤ 健康检查心跳 | M-04, M-18 |
 | M-13 | `services/retention.py` | 挽留策略：硬编码规则（quality/damaged 不挽留；size→换货；not_wanted/bought_wrong→补偿）；轮次判断（conversation.retention_attempts ≥ RETENTION_MAX_ATTEMPTS）；仅处理非拒付的退货/退款/换货请求——拒付信号已在 M-06 阶段拦截；补偿生成 pending_review 草稿，换货直接发送；`is_customer_accepted()` 使用关键词 + LLM 判定客户是否接受 | M-03, M-06 |
 | M-14 | `services/qa.py` | 标准 QA 库：qa_pairs 表 CRUD + 全量注入（≤100 条） | M-03, M-07 |
-| M-15 | `api/admin.py` | 老板后台 REST API（收件箱/工单/会话/知识库/标准 QA/暂停/回收站/审计） | M-03 |
+| M-15 | `api/admin.py` | 老板后台 REST API（收件箱/工单/会话/知识库/标准 QA/暂停/审计） | M-03 |
 | M-16 | `api/auth.py` | 登录 + JWT（httpOnly Cookie），无 CSRF token、无 refresh 续期 | M-03 |
 | M-17 | `services/audit.py` | 审计日志中间件 + 服务 | M-03 |
 | M-18 | `services/alerting.py` | 告警通道抽象（SMTP/Bark Webhook） | M-02 |
@@ -297,7 +297,6 @@ erDiagram
         datetime created_at
         datetime sent_at
         string send_error
-        bool is_deleted
     }
     TICKET {
         int id PK
@@ -308,7 +307,6 @@ erDiagram
         text owner_reply_cn
         datetime sla_deadline
         datetime resolved_at
-        bool is_deleted
     }
     KNOWLEDGE_DOC {
         int id PK
@@ -422,7 +420,6 @@ erDiagram
 | created_at | DATETIME | NOT NULL | | 创建时间（补偿挽留待审核超时依据） |
 | sent_at | DATETIME | | | 实际发送时间 |
 | send_error | TEXT | | | 发送失败原因 |
-| is_deleted | BOOL | DEFAULT 0 | | 软删除（回收站 30 天可恢复） |
 
 #### tickets（高风险工单）
 | 字段 | 类型 | 约束 | 索引 | 注释 |
@@ -435,11 +432,10 @@ erDiagram
 | owner_reply_cn | TEXT | | | 老板处理时的中文回复 |
 | sla_deadline | DATETIME | NOT NULL | idx | **= 邮件 received_at + 24h**（不论工作日，24×7 倒计时，逾期工单标红） |
 | resolved_at | DATETIME | | | 关闭时间 |
-| is_deleted | BOOL | DEFAULT 0 | | 软删除 |
 
 #### 状态机映射
 
-- `ticket.status`：`pending`（AI 自动创建）→ `in_progress`（老板首次点开）→ `resolved`（填写 owner_reply_cn 并完成发送）；软删除 `is_deleted=1`
+- `ticket.status`：`pending`（AI 自动创建）→ `in_progress`（老板首次点开）→ `resolved`（填写 owner_reply_cn 并完成发送）
 - `resolved → in_progress` 允许老板手工反向流转（误操作可纠正），必须写审计日志
 - `ticket.status=escalated` = `in_progress` 的对外别名（便于前端分桶展示），DB 仅存 `in_progress`
 - `conversation.status` 自动派生：
@@ -736,12 +732,6 @@ NEGATIVE_KEYWORDS = [
 - **Request**：`{ "reason?": "string" }`
 - **行为**：退回 `pending_review` 草稿为 `draft`，写审计日志；老板可重新编辑后再发送
 
-#### `GET /api/v1/replies/trash`
-- **行为**：返回 `is_deleted=1` 的已发邮件回收站列表
-
-#### `POST /api/v1/replies/{id}/restore`
-- **行为**：30 天内将已发邮件从回收站恢复；超期返回 `410 DELETED_EXPIRED`
-
 #### `GET /api/v1/attachments/{id}`
 - **鉴权**：owner
 - **行为**：按 `attachments.stored_path` 读取附件并返回文件流，供会话详情下载/预览
@@ -771,13 +761,6 @@ NEGATIVE_KEYWORDS = [
 #### `PATCH /api/v1/tickets/{id}`
 - **Request**：`{ "status?: string", "owner_reply_cn?: string" }`
 - **注意**：`status=resolved` 必填 `owner_reply_cn`
-
-#### `GET /api/v1/tickets/trash`
-- **Query**：`page` / `size`
-- **行为**：返回 `is_deleted=1` 的工单回收站列表
-
-#### `POST /api/v1/tickets/{id}/restore`
-- **行为**：30 天内将 `is_deleted=1` 恢复为 `is_deleted=0`；超过 30 天返回 `410 DELETED_EXPIRED`
 
 ---
 
@@ -858,7 +841,6 @@ NEGATIVE_KEYWORDS = [
 | 403 | `FORBIDDEN` | 越权 |
 | 404 | `NOT_FOUND` | 资源不存在 |
 | 409 | `CONFLICT` | Message-ID 重复/状态冲突 |
-| 410 | `DELETED_EXPIRED` | 回收站数据超过 30 天，不可恢复 |
 | 413 | `TOO_LARGE` | 文件超过 20MB |
 | 422 | `LLM_FAILED` | 模型调用失败（已重试 2 次） |
 | 500 | `INTERNAL` | 未捕获异常 |

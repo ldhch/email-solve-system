@@ -213,6 +213,42 @@ def _ensure_email_imap_uid_columns(engine: Engine) -> None:
             conn.execute(text("ALTER TABLE emails ADD COLUMN imap_uidvalidity VARCHAR(64)"))
 
 
+def _ensure_conversation_is_archived_column(engine: Engine) -> None:
+    """Add ``conversations.is_archived`` to DBs created before the column existed."""
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(conversations)"))}
+        if "is_archived" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE conversations "
+                    "ADD COLUMN is_archived BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
+
+
+def _drop_reply_is_deleted_column(engine: Engine) -> None:
+    """Drop ``replies.is_deleted`` (recycle-bin soft delete, removed 2026-08).
+
+    The column is unindexed and always 0 in production (no delete UI ever
+    existed), so a guarded DROP COLUMN is safe and idempotent.
+    """
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(replies)"))}
+        if "is_deleted" in cols:
+            conn.execute(text("ALTER TABLE replies DROP COLUMN is_deleted"))
+
+
+def _drop_ticket_is_deleted_column(engine: Engine) -> None:
+    """Drop ``tickets.is_deleted`` (recycle-bin soft delete, removed 2026-08)."""
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(tickets)"))}
+        if "is_deleted" in cols:
+            conn.execute(text("ALTER TABLE tickets DROP COLUMN is_deleted"))
+
+
 def _ensure_system_state_test_columns(engine: Engine) -> None:
     """Add ``system_state.test_mode`` / ``test_whitelist`` to existing DBs."""
 
@@ -251,6 +287,9 @@ def init_db(settings: Settings | None = None) -> None:
     _ensure_email_is_ad_column(engine)
     _ensure_email_imap_uid_columns(engine)
     _ensure_reply_low_confidence_column(engine)
+    _ensure_conversation_is_archived_column(engine)
+    _drop_reply_is_deleted_column(engine)
+    _drop_ticket_is_deleted_column(engine)
     _ensure_system_state_test_columns(engine)
     seed(settings)
 

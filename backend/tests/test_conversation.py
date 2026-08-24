@@ -116,6 +116,26 @@ def test_risk_level_takes_highest(db, settings) -> None:
     assert conv.risk_level == "high"
 
 
+def test_merge_clears_archive_flag(db, settings) -> None:
+    service = ConversationService(db, settings)
+    first = service.merge(_email("Order issue", utcnow(), "<arch1@x>"))
+    first.conversation.is_archived = True
+    db.commit()
+
+    # a reply on an archived thread surfaces it back in the inbox
+    second = service.merge(
+        _email(
+            "Re: Order issue",
+            utcnow() + timedelta(hours=1),
+            "<arch2@x>",
+            in_reply_to="<arch1@x>",
+        )
+    )
+    assert second.created is False
+    assert second.conversation.id == first.conversation.id
+    assert second.conversation.is_archived is False
+
+
 def test_window_slides_forward(db, settings) -> None:
     service = ConversationService(db, settings)
     now = utcnow()

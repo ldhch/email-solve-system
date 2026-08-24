@@ -830,7 +830,6 @@ class IngestService:
             select(Ticket)
             .where(
                 Ticket.conversation_id == conversation.id,
-                Ticket.is_deleted.is_(False),
                 Ticket.status.in_(("pending", "in_progress")),
             )
             .order_by(Ticket.id.asc())
@@ -1501,7 +1500,6 @@ class IngestService:
                 select(Ticket.id)
                 .where(
                     Ticket.conversation_id == conversation.id,
-                    Ticket.is_deleted.is_(False),
                     Ticket.status.in_(("pending", "in_progress")),
                 )
                 .limit(1)

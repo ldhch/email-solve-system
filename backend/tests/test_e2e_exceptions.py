@@ -520,62 +520,6 @@ def test_exception_12_sla_overdue_alerts(
     assert "sla_overdue" in _audit_actions(db)
 
 
-# ---------- scenario 13: soft delete + trash + restore (30d) ----------
-
-
-def test_exception_13_soft_delete_trash_restore(
-    settings, session_factory, db, fake_smtp_class, fake_imap
-) -> None:
-    raw = make_raw_email(
-        subject="Dispute",
-        body="I will file a chargeback with my bank.",
-        message_id="<trash-1@example.com>",
-    )
-    _service(db, settings, fake_imap([("1", raw)])).fetch_and_process()
-    ticket = db.execute(select(Ticket)).scalar_one()
-    reply = db.execute(select(Reply)).scalar_one()
-
-    seed_owner(session_factory, settings.owner_username, settings.owner_password)
-    client = make_client(settings, session_factory)
-    try:
-        login(client, settings.owner_username, settings.owner_password)
-        assert api(client, "DELETE", f"/api/v1/tickets/{ticket.id}").status_code == 200
-        trash = api(client, "GET", "/api/v1/tickets/trash").json()["data"]["items"]
-        assert [t["id"] for t in trash] == [ticket.id]
-        assert api(client, "POST", f"/api/v1/tickets/{ticket.id}/restore").status_code == 200
-
-        assert api(client, "DELETE", f"/api/v1/replies/{reply.id}").status_code == 200
-        trash_r = api(client, "GET", "/api/v1/replies/trash").json()["data"]["items"]
-        assert [r["id"] for r in trash_r] == [reply.id]
-        assert api(client, "POST", f"/api/v1/replies/{reply.id}/restore").status_code == 200
-    finally:
-        close_client(client)
-
-
-def test_exception_13b_expired_trash_cannot_restore(
-    settings, session_factory, db, fake_smtp_class, fake_imap
-) -> None:
-    raw = make_raw_email(
-        subject="Dispute",
-        body="I will file a chargeback with my bank.",
-        message_id="<expired-1@example.com>",
-    )
-    _service(db, settings, fake_imap([("1", raw)])).fetch_and_process()
-    ticket = db.execute(select(Ticket)).scalar_one()
-    ticket.created_at = utcnow() - timedelta(days=31)
-    ticket.is_deleted = True
-    db.commit()
-
-    seed_owner(session_factory, settings.owner_username, settings.owner_password)
-    client = make_client(settings, session_factory)
-    try:
-        login(client, settings.owner_username, settings.owner_password)
-        resp = api(client, "POST", f"/api/v1/tickets/{ticket.id}/restore")
-        assert resp.status_code == 410
-    finally:
-        close_client(client)
-
-
 # ---------- scenario 14: empty KB/QA -> generic reply with marker ----------
 
 

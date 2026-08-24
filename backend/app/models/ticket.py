@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
+from sqlalchemy import DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -27,7 +27,6 @@ class Ticket(Base):
     owner_reply_cn: Mapped[str | None] = mapped_column(Text)
     sla_deadline: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
-    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     conversation = relationship("Conversation", back_populates="tickets")

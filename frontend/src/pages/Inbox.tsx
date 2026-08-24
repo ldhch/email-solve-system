@@ -36,6 +36,7 @@ interface ConversationData {
   status: string;
   risk_level: string | null;
   is_ad?: boolean;
+  is_archived?: boolean;
   retention_attempts: number;
   sla_deadline: string | null;
   open_tickets?: {
@@ -116,13 +117,14 @@ export default function Inbox() {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [total, setTotal] = useState(0);
   const [filter, setFilter] = useState<
-    "all" | "unread" | "pending_review" | "unknown" | "high" | "ad"
+    "all" | "unread" | "pending_review" | "unknown" | "high" | "ad" | "archived"
   >("all");
   const [pendingCount, setPendingCount] = useState(0);
   const [unreadCount, setUnreadCount] = useState(0);
   const [unknownCount, setUnknownCount] = useState(0);
   const [adCount, setAdCount] = useState(0);
   const [highCount, setHighCount] = useState(0);
+  const [archivedCount, setArchivedCount] = useState(0);
   // Pending "block this sender" confirm target: the boss picks between blocking
   // the whole domain or just this one address from the expanded row.
   const [blockCandidate, setBlockCandidate] = useState<{
@@ -130,6 +132,7 @@ export default function Inbox() {
     email: string;
   } | null>(null);
   const [blockError, setBlockError] = useState("");
+  const [archiveError, setArchiveError] = useState("");
   const [blocking, setBlocking] = useState(false);
   const [keywordInput, setKeywordInput] = useState("");
   const [keyword, setKeyword] = useState("");
@@ -181,6 +184,7 @@ export default function Inbox() {
         if (filter === "high") params.risk_level = "high";
         if (filter === "unknown") params.risk_level = "unknown";
         if (filter === "ad") params.ad = true;
+        if (filter === "archived") params.archived = true;
         if (filter === "unread") params.unread_only = true;
         if (keyword.trim()) params.keyword = keyword.trim();
         const resp = await http.get("/inbox", { params });
@@ -237,12 +241,14 @@ export default function Inbox() {
         unknown: number;
         ad: number;
         high: number;
+        archived: number;
       }>(resp);
       setUnreadCount(counts.unread);
       setPendingCount(counts.pending_review);
       setUnknownCount(counts.unknown);
       setAdCount(counts.ad);
       setHighCount(counts.high);
+      setArchivedCount(counts.archived);
     } catch {
       // keep the last known counts on transient failures
     }
@@ -357,6 +363,7 @@ export default function Inbox() {
     { key: "unknown" as const, label: "无法判定" },
     { key: "high" as const, label: "高风险" },
     { key: "ad" as const, label: "广告" },
+    { key: "archived" as const, label: "已归档" },
   ];
 
   async function blockSender(email: string, scope: "email" | "domain") {
@@ -371,6 +378,23 @@ export default function Inbox() {
       setBlockError(errorText(err));
     } finally {
       setBlocking(false);
+    }
+  }
+
+  async function toggleArchive() {
+    if (selectedId == null) return;
+    setArchiveError("");
+    try {
+      const target = conv?.is_archived ? "unarchive" : "archive";
+      await http.post(`/conversations/${selectedId}/${target}`);
+      // archiving (or unarchiving) drops the conversation from the current
+      // filtered list, so clear the reading pane and refresh list + counts
+      await load("replace");
+      await loadCounts();
+      setSelectedId(null);
+      setConv(null);
+    } catch {
+      setArchiveError("归档操作失败，请重试");
     }
   }
 
@@ -453,6 +477,17 @@ export default function Inbox() {
                     }`}
                   >
                     {adCount}
+                  </span>
+                )}
+                {t.key === "archived" && archivedCount > 0 && (
+                  <span
+                    className={`ml-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[11px] font-semibold tabular-nums ${
+                      filter === t.key
+                        ? "bg-white text-accent"
+                        : "bg-[#6B7280] text-white"
+                    }`}
+                  >
+                    {archivedCount}
                   </span>
                 )}
               </button>
@@ -674,6 +709,20 @@ export default function Inbox() {
                     <span className="px-2 py-0.5 rounded bg-[#EFF1F3] text-sub text-[11px]">
                       {CONV_STATUS_LABEL[conv.status] || conv.status}
                     </span>
+                    <button
+                      onClick={toggleArchive}
+                      className="px-2.5 py-1 border border-line rounded text-[12px] text-sub hover:text-ink"
+                      title={
+                        conv.is_archived
+                          ? "将会话放回收件箱"
+                          : "将会话移到「已归档」，新来信自动回收件箱"
+                      }
+                    >
+                      {conv.is_archived ? "取消归档" : "归档"}
+                    </button>
+                    {archiveError && (
+                      <span className="text-[11px] text-risk-high">{archiveError}</span>
+                    )}
                     {conv.is_ad && (
                       <button
                         onClick={() => {

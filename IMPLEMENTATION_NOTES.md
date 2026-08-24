@@ -17,7 +17,7 @@
 - **固定回执（acknowledgment，`services/acknowledgment.py`）**：转人工 / 待审核 / 补偿挽留的邮件发送固定英文回执（不走 LLM），同一会话只发一次；同时创建 medium 工单，SLA = 收件时间 + 2 个工作日（`business_days_from`，跳过周末）。发送失败（`ack_failed`）不影响审核，仍保证工单建立；成功发送后真正的人工回复会 `resolve` 该工单。
 - **LLM 自动发送风险收紧**：`classifier.resolve_action` 收敛为——仅 `product_spec` / `usage` / `gratitude` 且置信度 ≥ `auto_send_min_confidence`（默认 0.8）可自动发送；medium 一律 review（物流 `logistics_inquiry` / 改单 `order_modification` / 发票 `invoice` / 退款 `refund_request` 仍 escalate）；high / unknown 一律 escalate（差评、法律、媒体、平台投诉、拒付等强制 high）。`AUTO_SEND_MIN_CONFIDENCE` / `LOW_CONFIDENCE_THRESHOLD` 走 .env。
 - **翻译 prefill 并发 + 状态轮询**：`translation_prefill_batch_size`（默认 3）与 `translation_prefill_concurrency`（默认 3）；LLM 并发翻译、主线程串行落库（不锁 SQLite）。新增只读 `GET /api/v1/emails/{id}/translate/status`（`done` / `pending`），前端「全文」未缓存时先出英文、轮询到中文后自动替换。
-- **后台体验补齐**：新增工单页（`GET /api/v1/tickets`、回收站 `/tickets/trash` + 恢复）、黑名单页（`/api/v1/blocked-senders` 增删查）、回收站页（回复 `/replies/trash` + 工单）、审计页；失败回复可在详情查看 `send_error`、编辑（`PUT /replies/{id}`）后重试发送（`POST /replies/{id}/send`）。
+- **后台体验补齐**：新增工单页（`GET /api/v1/tickets`）、黑名单页（`/api/v1/blocked-senders` 增删查）、审计页；失败回复可在详情查看 `send_error`、编辑（`PUT /replies/{id}`）后重试发送（`POST /replies/{id}/send`）。
 - **时间展示优化**：收件箱固定 UTC+8、相对时间 + hover 完整时间、`↓ 来信 / ↑ 回信 / ✎ 草稿待审核` 标记；待审草稿 >12h 橙色、>24h 红色。
 - **本轮涉及文件**：`services/{acknowledgment,ingest,classifier,scheduler}.py`、`api/{inbox,conversations,audit,blocked_senders,tickets}.py`、`frontend/src/pages/{Tickets,BlockedSenders,Trash,AuditLogs}.tsx`、`frontend/src/components/{Timeline,PendingReviewCard,ReplyDraftEditor,Layout}.tsx`。
 

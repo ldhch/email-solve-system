@@ -271,7 +271,6 @@ class SchedulerService:
         with factory() as db:
             overdue = db.execute(
                 select(Ticket).where(
-                    Ticket.is_deleted.is_(False),
                     Ticket.status.in_(("pending", "in_progress")),
                     Ticket.sla_deadline < now,
                 )

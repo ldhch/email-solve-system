@@ -34,9 +34,6 @@ export function Layout({ children }: { children: ReactNode }) {
               <NavLink to="/blocked" className={linkCls}>
                 黑名单
               </NavLink>
-              <NavLink to="/trash" className={linkCls}>
-                回收站
-              </NavLink>
               <NavLink to="/templates" className={linkCls}>
                 快捷模板
               </NavLink>

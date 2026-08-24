@@ -33,6 +33,7 @@ def _seed_conversation(
     customer_email: str = "c@example.com",
     email_risk: str = "medium",
     is_ad: bool = False,
+    is_archived: bool = False,
 ) -> dict:
     """Insert customer/conversation/emails(+optional reply/ticket), return ids."""
 
@@ -49,6 +50,7 @@ def _seed_conversation(
             last_activity_at=utcnow(),
             status="open",
             risk_level="medium",
+            is_archived=is_archived,
         )
         db.add(conv)
         db.flush()
@@ -158,6 +160,51 @@ def test_inbox_list_and_detail(settings, session_factory) -> None:
         data = detail.json()["data"]
         assert data["conversation_id"] == ids["conversation_id"]
         assert data["summary_cn"] == "中文摘要"
+    finally:
+        close_client(client)
+
+
+def test_conversation_archive_flow(settings, session_factory) -> None:
+    ids = _seed_conversation(session_factory, emails=1)
+    client = _authed_client(settings, session_factory)
+    try:
+        # detail exposes the archive flag
+        detail = api(client, "GET", f"/api/v1/conversations/{ids['conversation_id']}")
+        assert detail.json()["data"]["is_archived"] is False
+
+        # archive -> hidden from the plain inbox, visible under archived=true
+        archived = api(
+            client, "POST", f"/api/v1/conversations/{ids['conversation_id']}/archive"
+        )
+        assert archived.status_code == 200
+        assert archived.json()["data"]["is_archived"] is True
+
+        plain = api(client, "GET", "/api/v1/inbox").json()["data"]
+        assert plain["total"] == 0
+        archived_list = api(
+            client, "GET", "/api/v1/inbox", params={"archived": True}
+        ).json()["data"]
+        assert archived_list["total"] == 1
+        assert archived_list["items"][0]["id"] == ids["conversation_id"]
+
+        counts = api(client, "GET", "/api/v1/inbox/counts").json()["data"]
+        assert counts["archived"] == 1
+
+        # unarchive -> back in the plain inbox, archived list empty
+        unarchived = api(
+            client, "POST", f"/api/v1/conversations/{ids['conversation_id']}/unarchive"
+        )
+        assert unarchived.json()["data"]["is_archived"] is False
+        assert api(client, "GET", "/api/v1/inbox").json()["data"]["total"] == 1
+        assert (
+            api(client, "GET", "/api/v1/inbox", params={"archived": True})
+            .json()["data"]["total"]
+            == 0
+        )
+
+        # unknown conversation -> 404
+        missing = api(client, "POST", "/api/v1/conversations/999999/archive")
+        assert missing.status_code == 404
     finally:
         close_client(client)
 
@@ -707,22 +754,6 @@ def test_failed_reply_can_be_edited_and_resent(
         close_client(client)
 
 
-def test_reply_trash_and_restore(settings, session_factory) -> None:
-    ids = _seed_conversation(session_factory, reply={"status": "sent"})
-    client = _authed_client(settings, session_factory)
-    try:
-        delete = api(client, "DELETE", f"/api/v1/replies/{ids['reply_id']}")
-        assert delete.status_code == 200
-        trash = api(client, "GET", "/api/v1/replies/trash")
-        assert trash.json()["data"]["total"] == 1
-        restore = api(client, "POST", f"/api/v1/replies/{ids['reply_id']}/restore")
-        assert restore.status_code == 200
-        trash2 = api(client, "GET", "/api/v1/replies/trash")
-        assert trash2.json()["data"]["total"] == 0
-    finally:
-        close_client(client)
-
-
 def test_tickets_list_and_update(settings, session_factory) -> None:
     ids = _seed_conversation(session_factory, ticket={"status": "pending"})
     client = _authed_client(settings, session_factory)
@@ -754,19 +785,6 @@ def test_tickets_list_and_update(settings, session_factory) -> None:
 
         resolved = api(client, "GET", "/api/v1/tickets", params={"status": "resolved"})
         assert resolved.json()["data"]["total"] == 1
-    finally:
-        close_client(client)
-
-
-def test_ticket_trash_and_restore(settings, session_factory) -> None:
-    ids = _seed_conversation(session_factory, ticket={"status": "pending"})
-    client = _authed_client(settings, session_factory)
-    try:
-        assert api(client, "DELETE", f"/api/v1/tickets/{ids['ticket_id']}").status_code == 200
-        trash = api(client, "GET", "/api/v1/tickets/trash")
-        assert trash.json()["data"]["total"] == 1
-        assert api(client, "POST", f"/api/v1/tickets/{ids['ticket_id']}/restore").status_code == 200
-        assert api(client, "GET", "/api/v1/tickets/trash").json()["data"]["total"] == 0
     finally:
         close_client(client)
 

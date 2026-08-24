@@ -96,9 +96,12 @@ class ConversationService:
             )
             return MergeResult(conversation=conversation, customer=customer, created=True)
 
-        # Reopen closed conversations and slide the window.
+        # Reopen closed conversations and slide the window. New mail on an
+        # archived conversation means the customer replied -> surface it back
+        # in the inbox by clearing the archive flag (M-16 archive UX).
         if conversation.status == "resolved":
             conversation.status = "open"
+        conversation.is_archived = False
         conversation.window_end = max(conversation.window_end, received + window)
         conversation.last_activity_at = received
         self.db.flush()
