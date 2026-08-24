@@ -818,13 +818,13 @@ export default function Inbox() {
                   </div>
                 )}
               <div className="flex-1 px-6 py-5 overflow-y-auto">
-                <PendingReviewCard items={conv.timeline} onRefresh={refresh} />
                 <Timeline
                   items={conv.timeline}
                   showCn={showCn}
                   mode={convMode}
                   customerEmail={conv.customer.email}
                 />
+                <PendingReviewCard items={conv.timeline} onRefresh={refresh} />
                 <ReplyDraftEditor items={conv.timeline} onChanged={refresh} />
                 <div className="mt-4">
                   {latestMsg && (
