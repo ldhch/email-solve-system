@@ -85,6 +85,7 @@ def _seed_conversation(
                 status=reply.get("status", "pending_review"),
                 reply_type=reply.get("reply_type", "general"),
                 source=reply.get("source", "system"),
+                send_error=reply.get("send_error"),
                 created_at=utcnow(),
             )
             db.add(reply_row)
@@ -95,7 +96,7 @@ def _seed_conversation(
             ticket_row = Ticket(
                 conversation_id=conv.id,
                 summary_cn="高风险工单摘要",
-                risk_level="high",
+                risk_level=ticket.get("risk_level", "high"),
                 status=ticket.get("status", "pending"),
                 sla_deadline=utcnow(),
                 created_at=utcnow(),
@@ -145,6 +146,7 @@ def test_inbox_list_and_detail(settings, session_factory) -> None:
         assert item["unread_count"] == 2
         assert item["is_read"] is False
         assert item["risk_level"] == "medium"
+        assert item["latest_kind"] == "email"
 
         filtered = api(client, "GET", "/api/v1/inbox", params={"risk_level": "medium"})
         assert filtered.json()["data"]["total"] == 1
@@ -204,18 +206,21 @@ def test_inbox_unread_and_mark_read(settings, session_factory) -> None:
     ids = _seed_conversation(session_factory, emails=2)
     client = _authed_client(settings, session_factory)
     try:
-        # unread-count is conversation-level: 1 conversation holds 2 unread emails
+        # Backward-compatible conversation count plus raw email count.
         count = api(client, "GET", "/api/v1/inbox/unread-count").json()["data"]
         assert count["unread"] == 1
+        assert count["unread_conversations"] == 1
+        assert count["unread_emails"] == 2
 
         email_id = ids["email_ids"][0]
         marked = api(client, "POST", f"/api/v1/inbox/{email_id}/read")
         assert marked.status_code == 200
         assert marked.json()["data"]["is_read"] is True
 
-        # one unread email remains in the conversation -> still counted unread
+        # one unread email remains in the conversation -> still one conversation
         after = api(client, "GET", "/api/v1/inbox/unread-count").json()["data"]
         assert after["unread"] == 1
+        assert after["unread_emails"] == 1
 
         listing = api(client, "GET", "/api/v1/inbox").json()["data"]["items"]
         assert listing[0]["is_read"] is False
@@ -246,6 +251,7 @@ def test_inbox_conversation_aggregation(settings, session_factory) -> None:
         assert row_a["email_count"] == 2
         assert row_a["unread_count"] == 2
         assert row_a["latest_status"] == "sent"
+        assert row_a["latest_kind"] == "reply_sent"
         # latest activity is the reply (ties resolve toward the reply)
         assert row_a["summary_cn"] == "回复内容"
         assert row_a["customer_name"] == "John"
@@ -253,6 +259,7 @@ def test_inbox_conversation_aggregation(settings, session_factory) -> None:
         row_b = by_id[ids_b["conversation_id"]]
         assert row_b["email_count"] == 1
         assert row_b["latest_status"] is None
+        assert row_b["latest_kind"] == "email"
         assert row_b["summary_cn"] == "中文摘要"
     finally:
         close_client(client)
@@ -272,6 +279,7 @@ def test_inbox_conversation_read(settings, session_factory) -> None:
 
         count = api(client, "GET", "/api/v1/inbox/unread-count").json()["data"]
         assert count["unread"] == 0
+        assert count["unread_emails"] == 0
         listing = api(client, "GET", "/api/v1/inbox").json()["data"]["items"]
         assert listing[0]["is_read"] is True
 
@@ -414,6 +422,7 @@ def test_inbox_counts_aggregate_badges(settings, session_factory) -> None:
         resp = api(client, "GET", "/api/v1/inbox/counts")
         assert resp.status_code == 200, resp.text
         counts = resp.json()["data"]
+        assert counts["unread"] == 3
         assert counts["pending_review"] == 1
         assert counts["unknown"] == 1  # the read one is no longer a to-do
         assert counts["high"] == 1
@@ -640,6 +649,64 @@ def test_approve_pending_review_sends(settings, session_factory, monkeypatch) ->
         close_client(client)
 
 
+def test_approve_pending_review_resolves_medium_ticket(
+    settings, session_factory, monkeypatch
+) -> None:
+    ids = _seed_conversation(
+        session_factory,
+        reply={"status": "pending_review"},
+        ticket={"status": "pending", "risk_level": "medium"},
+    )
+    monkeypatch.setattr(
+        conversations_module,
+        "_make_mailer",
+        lambda db, s: MailerService(db, s, smtp_class=FakeSMTP),
+    )
+    client = _authed_client(settings, session_factory)
+    try:
+        resp = api(client, "POST", f"/api/v1/replies/{ids['reply_id']}/approve")
+        assert resp.status_code == 200, resp.text
+        with session_factory() as db:
+            ticket = db.get(Ticket, ids["ticket_id"])
+            assert ticket.status == "resolved"
+    finally:
+        close_client(client)
+
+
+def test_failed_reply_can_be_edited_and_resent(
+    settings, session_factory, monkeypatch
+) -> None:
+    ids = _seed_conversation(
+        session_factory,
+        reply={
+            "status": "failed",
+            "send_error": "SMTP connection refused",
+        },
+    )
+    monkeypatch.setattr(
+        conversations_module,
+        "_make_mailer",
+        lambda db, s: MailerService(db, s, smtp_class=FakeSMTP),
+    )
+    client = _authed_client(settings, session_factory)
+    try:
+        edit = api(
+            client,
+            "PATCH",
+            f"/api/v1/replies/{ids['reply_id']}",
+            json={"content_cn": "很抱歉，我们重新发送。"},
+        )
+        assert edit.status_code == 200, edit.text
+        send = api(client, "POST", f"/api/v1/replies/{ids['reply_id']}/send")
+        assert send.status_code == 200, send.text
+        with session_factory() as db:
+            reply = db.get(Reply, ids["reply_id"])
+            assert reply.status == "sent"
+            assert reply.send_error is None
+    finally:
+        close_client(client)
+
+
 def test_reply_trash_and_restore(settings, session_factory) -> None:
     ids = _seed_conversation(session_factory, reply={"status": "sent"})
     client = _authed_client(settings, session_factory)
@@ -700,120 +767,6 @@ def test_ticket_trash_and_restore(settings, session_factory) -> None:
         assert trash.json()["data"]["total"] == 1
         assert api(client, "POST", f"/api/v1/tickets/{ids['ticket_id']}/restore").status_code == 200
         assert api(client, "GET", "/api/v1/tickets/trash").json()["data"]["total"] == 0
-    finally:
-        close_client(client)
-
-
-def test_split_and_merge_conversations(settings, session_factory) -> None:
-    ids = _seed_conversation(session_factory, emails=2)
-    client = _authed_client(settings, session_factory)
-    try:
-        split = api(
-            client,
-            "POST",
-            f"/api/v1/conversations/{ids['conversation_id']}/split",
-            json={"at_email_id": ids["email_ids"][1]},
-        )
-        assert split.status_code == 200, split.text
-        new_id = split.json()["data"]["new_conversation_id"]
-        assert new_id != ids["conversation_id"]
-
-        with session_factory() as db:
-            original_count = len(
-                db.execute(
-                    select(Email).where(Email.conversation_id == ids["conversation_id"])
-                ).scalars().all()
-            )
-            new_count = len(
-                db.execute(select(Email).where(Email.conversation_id == new_id)).scalars().all()
-            )
-        assert (original_count, new_count) == (1, 1)
-
-        merge = api(
-            client,
-            "POST",
-            f"/api/v1/conversations/{ids['conversation_id']}/merge",
-            json={"other_conversation_id": new_id},
-        )
-        assert merge.status_code == 200
-        with session_factory() as db:
-            count = len(
-                db.execute(
-                    select(Email).where(Email.conversation_id == ids["conversation_id"])
-                ).scalars().all()
-            )
-        assert count == 2
-    finally:
-        close_client(client)
-
-
-def test_merge_moves_tickets_to_target_conversation(
-    settings, session_factory
-) -> None:
-    """Phase 3: merging a conversation that owns a Ticket must not 500."""
-
-    with session_factory() as db:
-        customer = Customer(
-            email="merge-ticket@example.com", display_name="Merge", created_at=utcnow()
-        )
-        db.add(customer)
-        db.flush()
-        conv_a = Conversation(
-            customer_id=customer.id,
-            subject_normalized="thread a",
-            window_end=utcnow(),
-            last_activity_at=utcnow(),
-            status="open",
-        )
-        conv_b = Conversation(
-            customer_id=customer.id,
-            subject_normalized="thread b",
-            window_end=utcnow(),
-            last_activity_at=utcnow(),
-            status="open",
-        )
-        db.add_all([conv_a, conv_b])
-        db.flush()
-        for conv in (conv_a, conv_b):
-            db.add(
-                Email(
-                    conversation_id=conv.id,
-                    message_id=f"<merge-ticket-{conv.id}@example.com>",
-                    subject="Order question",
-                    from_email="merge-ticket@example.com",
-                    to_email="bot@example.com",
-                    body_text="body",
-                    is_inbound=True,
-                    received_at=utcnow(),
-                )
-            )
-        db.flush()
-        ticket = Ticket(
-            conversation_id=conv_b.id,
-            summary_cn="高风险工单",
-            risk_level="high",
-            status="pending",
-            sla_deadline=utcnow(),
-            created_at=utcnow(),
-        )
-        db.add(ticket)
-        db.commit()
-        target_id, other_id, ticket_id = conv_a.id, conv_b.id, ticket.id
-
-    client = _authed_client(settings, session_factory)
-    try:
-        resp = api(
-            client,
-            "POST",
-            f"/api/v1/conversations/{target_id}/merge",
-            json={"other_conversation_id": other_id},
-        )
-        assert resp.status_code == 200, resp.text
-        with session_factory() as db:
-            moved = db.get(Ticket, ticket_id)
-            assert moved is not None
-            assert moved.conversation_id == target_id
-            assert db.get(Conversation, other_id) is None
     finally:
         close_client(client)
 
@@ -1047,6 +1000,7 @@ def test_inbox_ad_filter_and_exclusion(settings, session_factory) -> None:
 
         unread = api(client, "GET", "/api/v1/inbox/unread-count").json()["data"]
         assert unread["unread"] == 1  # ad mail never counts toward unread
+        assert unread["unread_emails"] == 1
     finally:
         close_client(client)
 

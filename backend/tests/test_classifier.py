@@ -68,6 +68,29 @@ def test_llm_chargeback_flag_forced_high() -> None:
     assert result.chargeback_risk is True
 
 
+def test_bad_review_keyword_forced_high() -> None:
+    settings = Settings(low_confidence_threshold=0.6)
+    llm = StubLLM(
+        '{"risk_level":"low","confidence":0.95,"category":"product_spec",'
+        '"chargeback_risk":false,"summary_cn":"普通咨询"}'
+    )
+    parsed = _parsed("I will leave a terrible review and complain to the BBB.")
+    result = ClassifierService(settings, llm).classify(parsed)
+    assert result.risk_level == "high"
+    assert result.chargeback_risk is True
+
+
+def test_lawyer_keyword_forced_high() -> None:
+    settings = Settings(low_confidence_threshold=0.6)
+    llm = StubLLM(
+        '{"risk_level":"low","confidence":0.95,"category":"gratitude",'
+        '"chargeback_risk":false,"summary_cn":"普通邮件"}'
+    )
+    parsed = _parsed("My lawyer will contact you about this order.")
+    result = ClassifierService(settings, llm).classify(parsed)
+    assert result.risk_level == "high"
+
+
 def test_low_confidence_downgraded_to_unknown() -> None:
     settings = Settings(low_confidence_threshold=0.6)
     llm = StubLLM(
@@ -90,20 +113,26 @@ def test_refund_request_parsed() -> None:
 
 
 def test_resolve_action_mapping() -> None:
-    assert resolve_action("low", "product_spec") == "auto_send"
-    assert resolve_action("low", "gratitude") == "auto_send"
+    assert resolve_action("low", "product_spec", confidence=0.9) == "auto_send"
+    assert resolve_action("low", "gratitude", confidence=0.9) == "auto_send"
     assert resolve_action("low", "refund_request") == "escalate"
-    # Boss decision (方案 A): pure consultations auto-send even if medium.
-    assert resolve_action("medium", "product_spec") == "auto_send"
-    assert resolve_action("medium", "policy") == "auto_send"
-    assert resolve_action("medium", "warranty") == "auto_send"
-    assert resolve_action("medium", "usage") == "auto_send"
+    # Conservative routing: medium always reviews, even for pure consultations.
+    assert resolve_action("medium", "product_spec") == "review"
+    assert resolve_action("medium", "policy") == "review"
+    assert resolve_action("medium", "warranty") == "review"
+    assert resolve_action("medium", "usage") == "review"
     assert resolve_action("medium", "gratitude") == "review"
     assert resolve_action("medium", "logistics_inquiry") == "escalate"
     assert resolve_action("medium", "invoice") == "escalate"
     assert resolve_action("medium", "order_modification") == "escalate"
     assert resolve_action("high", "refund_request") == "escalate"
     assert resolve_action("unknown", "other") == "escalate"
+    # Category guard: LLM says low but category needs manual handling.
+    assert resolve_action("low", "invoice", confidence=0.95) == "escalate"
+    assert resolve_action("low", "logistics_inquiry", confidence=0.95) == "escalate"
+    assert resolve_action("low", "other", confidence=0.95) == "review"
+    # Confidence guard: a not-confident low-risk product question reviews.
+    assert resolve_action("low", "product_spec", confidence=0.7) == "review"
 
 
 def test_llm_failure_raises() -> None:

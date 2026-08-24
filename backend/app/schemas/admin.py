@@ -21,14 +21,6 @@ class SendReplyRequest(BaseModel):
     pass
 
 
-class SplitConversationRequest(BaseModel):
-    at_email_id: int
-
-
-class MergeConversationRequest(BaseModel):
-    other_conversation_id: int
-
-
 class TicketUpdateRequest(BaseModel):
     status: str | None = None
     owner_reply_cn: str | None = None

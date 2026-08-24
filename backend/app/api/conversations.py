@@ -16,26 +16,21 @@ from app.db.session import get_db
 from app.llm.client import build_llm_client
 from app.models.attachment import Attachment
 from app.models.conversation import Conversation
-from app.models.customer import Customer
 from app.models.email import Email
 from app.models.reply import Reply
 from app.models.ticket import Ticket
 from app.schemas.admin import (
     EditReplyRequest,
     ManualReplyRequest,
-    MergeConversationRequest,
     RejectReplyRequest,
-    SplitConversationRequest,
 )
 from app.services.audit import log_action, utcnow
-from app.services.conversation import normalize_subject
+from app.services.acknowledgment import resolve_review_tickets
 from app.services.mailer import MailerService
 from app.services.replier import ReplierService
 from app.services.translator import TranslatorService, contains_cjk
 
 router = APIRouter(prefix="/api/v1", tags=["conversations"])
-
-RISK_RANK = {"high": 3, "medium": 2, "low": 1}
 
 
 def _fmt(dt) -> str | None:
@@ -77,17 +72,6 @@ def _has_newer_release(db: Session, reply: Reply) -> bool:
         ).scalars().first()
         is not None
     )
-
-
-def _recompute_risk(db: Session, conv: Conversation) -> None:
-    levels = [
-        risk
-        for risk in db.execute(
-            select(Email.risk_level).where(Email.conversation_id == conv.id)
-        ).scalars().all()
-        if risk in RISK_RANK
-    ]
-    conv.risk_level = max(levels, key=RISK_RANK.get) if levels else None
 
 
 @router.get("/conversations/{conversation_id}")
@@ -145,6 +129,7 @@ async def conversation_detail(
                 "reply_type": r.reply_type,
                 "source": r.source,
                 "low_confidence": r.low_confidence,
+                "send_error": r.send_error,
                 "at": _fmt(r.sent_at or r.created_at),
             }
         )
@@ -169,25 +154,6 @@ async def conversation_detail(
         1 for t in conv.tickets if not t.is_deleted and t.status == "resolved"
     )
 
-    # PRD edge case 15: same display name on a different address is surfaced as
-    # a "possible same customer" hint; the boss decides whether to merge.
-    suggested_merge_conversation_id = None
-    if conv.customer.display_name:
-        twins = db.execute(
-            select(Customer.id).where(
-                Customer.display_name == conv.customer.display_name,
-                Customer.id != conv.customer_id,
-            )
-        ).scalars().all()
-        if twins:
-            other = db.execute(
-                select(Conversation)
-                .where(Conversation.customer_id.in_(twins))
-                .order_by(Conversation.last_activity_at.desc())
-            ).scalars().first()
-            if other is not None:
-                suggested_merge_conversation_id = other.id
-
     return ok(
         {
             "id": conv.id,
@@ -200,7 +166,6 @@ async def conversation_detail(
             "risk_level": conv.risk_level,
             "is_ad": any(e.is_ad for e in emails if e is not None),
             "retention_attempts": conv.retention_attempts,
-            "suggested_merge_conversation_id": suggested_merge_conversation_id,
             "sla_deadline": _fmt(sla_deadline),
             # Ticket state for the merged ticket bar: open high-risk tickets
             # (with SLA + overdue flag) and a count of resolved ones.
@@ -388,6 +353,12 @@ async def approve_reply(
     conv = db.get(Conversation, reply.conversation_id)
     if conv is not None:
         conv.last_activity_at = utcnow()
+    resolve_review_tickets(
+        db,
+        reply.conversation_id,
+        actor_id=user.id,
+        ip=_ip(request),
+    )
     log_action(
         db,
         "reply_approved",
@@ -440,7 +411,7 @@ async def edit_reply(
     reply = db.get(Reply, reply_id)
     if reply is None:
         raise HTTPException(status_code=404, detail="NOT_FOUND")
-    if reply.status not in ("draft", "pending_review"):
+    if reply.status not in ("draft", "pending_review", "failed"):
         raise HTTPException(status_code=409, detail="NOT_EDITABLE")
     customer_name = None
     conv = db.get(Conversation, reply.conversation_id)
@@ -487,7 +458,7 @@ async def send_draft(
     reply = db.get(Reply, reply_id)
     if reply is None:
         raise HTTPException(status_code=404, detail="NOT_FOUND")
-    if reply.status != "draft":
+    if reply.status not in ("draft", "failed"):
         raise HTTPException(status_code=409, detail="NOT_EDITABLE")
     if _has_newer_release(db, reply):
         raise HTTPException(status_code=409, detail="SUPERSEDED")
@@ -533,9 +504,16 @@ async def send_draft(
 
     reply.status = "sent"
     reply.sent_at = utcnow()
+    reply.send_error = None
     conv = db.get(Conversation, reply.conversation_id)
     if conv is not None:
         conv.last_activity_at = utcnow()
+    resolve_review_tickets(
+        db,
+        reply.conversation_id,
+        actor_id=user.id,
+        ip=_ip(request),
+    )
     log_action(
         db,
         "reply_sent",
@@ -630,104 +608,3 @@ async def restore_reply(
     )
     db.commit()
     return ok({"reply_id": reply.id})
-
-
-@router.post("/conversations/{conversation_id}/split")
-async def split_conversation(
-    conversation_id: int,
-    payload: SplitConversationRequest,
-    request: Request,
-    user=Depends(require_owner),
-    db: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings_dependency),
-) -> dict:
-    """Move emails (and their replies) at/after `at_email_id` to a new thread."""
-
-    conv = db.get(Conversation, conversation_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="NOT_FOUND")
-    at_email = db.get(Email, payload.at_email_id)
-    if at_email is None or at_email.conversation_id != conv.id:
-        raise HTTPException(status_code=400, detail="EMAIL_NOT_IN_CONVERSATION")
-
-    moved = db.execute(
-        select(Email)
-        .where(Email.conversation_id == conv.id, Email.id >= payload.at_email_id)
-        .order_by(Email.id)
-    ).scalars().all()
-    if len(moved) == len(db.execute(select(Email).where(Email.conversation_id == conv.id)).scalars().all()):
-        raise HTTPException(status_code=400, detail="NOTHING_TO_SPLIT")
-
-    new_conv = Conversation(
-        customer_id=conv.customer_id,
-        subject_normalized=normalize_subject(moved[0].subject),
-        window_end=moved[-1].received_at
-        + timedelta(days=settings.conversation_window_days),
-        last_activity_at=moved[-1].received_at,
-        status="open",
-    )
-    db.add(new_conv)
-    db.flush()
-    moved_ids = [e.id for e in moved]
-    for e in moved:
-        e.conversation = new_conv  # relationship assignment keeps both sides in sync
-    for r in db.execute(
-        select(Reply).where(Reply.email_id.in_(moved_ids))
-    ).scalars().all():
-        r.conversation = new_conv
-    _recompute_risk(db, conv)
-    _recompute_risk(db, new_conv)
-    log_action(
-        db,
-        "conversation_split",
-        "conversation",
-        conversation_id,
-        actor_id=user.id,
-        ip=_ip(request),
-        commit=False,
-    )
-    db.commit()
-    return ok({"new_conversation_id": new_conv.id})
-
-
-@router.post("/conversations/{conversation_id}/merge")
-async def merge_conversations(
-    conversation_id: int,
-    payload: MergeConversationRequest,
-    request: Request,
-    user=Depends(require_owner),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Merge `other_conversation_id` into this one (same customer only)."""
-
-    conv = db.get(Conversation, conversation_id)
-    other = db.get(Conversation, payload.other_conversation_id)
-    if conv is None or other is None:
-        raise HTTPException(status_code=404, detail="NOT_FOUND")
-    if conv.id == other.id:
-        raise HTTPException(status_code=400, detail="SAME_CONVERSATION")
-    if other.customer_id != conv.customer_id:
-        raise HTTPException(status_code=409, detail="DIFFERENT_CUSTOMER")
-
-    for e in list(other.emails):
-        e.conversation = conv
-    for r in list(other.replies):
-        r.conversation = conv
-    for t in list(other.tickets):
-        t.conversation = conv
-    db.flush()
-    conv.window_end = max(conv.window_end, other.window_end)
-    conv.last_activity_at = max(conv.last_activity_at, other.last_activity_at)
-    _recompute_risk(db, conv)
-    db.delete(other)
-    log_action(
-        db,
-        "conversation_merge",
-        "conversation",
-        conversation_id,
-        actor_id=user.id,
-        ip=_ip(request),
-        commit=False,
-    )
-    db.commit()
-    return ok({"conversation_id": conversation_id})

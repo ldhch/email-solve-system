@@ -343,7 +343,10 @@ def test_exception_06_empty_mail_goes_to_manual(db, settings, fake_smtp_class, f
     email = db.execute(select(Email)).scalar_one()
     assert email.risk_level == "unknown"
     assert "可疑" in (email.summary_cn or "")
-    assert db.execute(select(Reply)).scalars().all() == []
+    ack = db.execute(
+        select(Reply).where(Reply.reply_type == "acknowledgment")
+    ).scalars().one()
+    assert ack.status == "sent"
     assert "requires_manual" in _audit_actions(db)
     # The manual mail is tracked by its persisted UID, never flagged seen.
     assert imap.seen == []
@@ -369,7 +372,9 @@ def test_exception_07_low_confidence_downgraded_to_manual(
     assert summary["review"] == 1
     email = db.execute(select(Email)).scalar_one()
     assert email.risk_level == "unknown"
-    reply = db.execute(select(Reply)).scalar_one()
+    reply = db.execute(
+        select(Reply).where(Reply.status == "pending_review")
+    ).scalars().one()
     assert reply.status == "pending_review"
     assert reply.low_confidence is True
 
@@ -464,8 +469,8 @@ def test_exception_11_no_order_data_no_fabrication(
     db, settings, fake_smtp_class, fake_imap
 ) -> None:
     raw = make_raw_email(
-        subject="Warranty question",
-        body="Is the warranty still valid?",
+        subject="Product size question",
+        body="What is the size of the XL shirt?",
         message_id="<warranty-1@example.com>",
     )
     imap = fake_imap([("1", raw)])
@@ -592,47 +597,6 @@ def test_exception_14_no_kb_no_qa_uses_fallback_marker(
     assert db.execute(select(KnowledgeDoc)).scalars().all() == []
 
 
-# ---------- scenario 15: same display name, different address ----------
-
-
-def test_exception_15_same_display_name_suggests_merge(
-    settings, session_factory
-) -> None:
-    now = utcnow()
-    with session_factory() as db:
-        c1 = Customer(email="a@example.com", display_name="John Smith", created_at=now)
-        c2 = Customer(email="b@example.com", display_name="John Smith", created_at=now)
-        db.add_all([c1, c2])
-        db.flush()
-        conv1 = Conversation(
-            customer_id=c1.id,
-            subject_normalized="hello",
-            window_end=now + timedelta(days=7),
-            last_activity_at=now,
-            status="open",
-        )
-        conv2 = Conversation(
-            customer_id=c2.id,
-            subject_normalized="hello",
-            window_end=now + timedelta(days=7),
-            last_activity_at=now - timedelta(days=1),
-            status="open",
-        )
-        db.add_all([conv1, conv2])
-        db.commit()
-
-    seed_owner(session_factory, settings.owner_username, settings.owner_password)
-    client = make_client(settings, session_factory)
-    try:
-        login(client, settings.owner_username, settings.owner_password)
-        resp = api(client, "GET", f"/api/v1/conversations/{conv1.id}")
-        assert resp.status_code == 200
-        data = resp.json()["data"]
-        assert data["suggested_merge_conversation_id"] == conv2.id
-    finally:
-        close_client(client)
-
-
 # ---------- scenario 16: duplicate Message-ID dedupe ----------
 
 
@@ -680,46 +644,6 @@ def test_exception_17_smtp_failure_queues_and_retries_without_regeneration(
     assert len(replies) == 1  # same draft, no regeneration
     assert replies[0].status == "sent"
     assert replies[0].sent_at is not None
-
-
-# ---------- scenario 18: wrong merge -> boss splits ----------
-
-
-def test_exception_18_split_conversation_via_api(
-    settings, session_factory, db, fake_smtp_class, fake_imap
-) -> None:
-    raw1 = make_raw_email(
-        subject="Same topic",
-        body="Question one about the product.",
-        message_id="<split-1@example.com>",
-    )
-    raw2 = make_raw_email(
-        subject="Same topic",
-        body="Question two about the product.",
-        message_id="<split-2@example.com>",
-    )
-    _service(db, settings, fake_imap([("1", raw1), ("2", raw2)])).fetch_and_process()
-    emails = db.execute(select(Email).order_by(Email.id)).scalars().all()
-    assert len({e.conversation_id for e in emails}) == 1
-
-    seed_owner(session_factory, settings.owner_username, settings.owner_password)
-    client = make_client(settings, session_factory)
-    try:
-        login(client, settings.owner_username, settings.owner_password)
-        conv_id = emails[0].conversation_id
-        resp = api(
-            client,
-            "POST",
-            f"/api/v1/conversations/{conv_id}/split",
-            json={"at_email_id": emails[1].id},
-        )
-        assert resp.status_code == 200
-        new_id = resp.json()["data"]["new_conversation_id"]
-        assert db.get(Conversation, conv_id).emails[0].id == emails[0].id
-        assert db.get(Conversation, new_id).emails[0].id == emails[1].id
-        assert "conversation_split" in _audit_actions(db)
-    finally:
-        close_client(client)
 
 
 # ---------- scenario 19: chargeback never enters retention ----------

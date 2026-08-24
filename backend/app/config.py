@@ -98,6 +98,7 @@ class Settings(BaseSettings):
     session_auto_close_days: int = 30
     conversation_subject_similarity_threshold: float = 0.75
     low_confidence_threshold: float = 0.6
+    auto_send_min_confidence: float = 0.8
     retention_max_attempts: int = 2
     compensation_max_usd: float = 20.0
     conversation_window_days: int = 7
@@ -136,6 +137,8 @@ class Settings(BaseSettings):
 
     # Optional chargeback keyword override (comma separated)
     chargeback_keywords: str = ""
+    # Optional additional high-risk keyword override (comma separated)
+    high_risk_keywords: str = ""
 
     @field_validator("database_url", mode="after")
     @classmethod
@@ -177,6 +180,10 @@ class Settings(BaseSettings):
     @property
     def chargeback_keyword_list(self) -> list[str]:
         return [k.strip() for k in self.chargeback_keywords.split(",") if k.strip()]
+
+    @property
+    def high_risk_keyword_list(self) -> list[str]:
+        return [k.strip() for k in self.high_risk_keywords.split(",") if k.strip()]
 
 
 def apply_secret_overrides(

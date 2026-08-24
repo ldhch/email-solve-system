@@ -163,6 +163,7 @@ def _conversation_rows(
             summary = reply.content_cn or reply.content_en or latest_email.summary_cn
             latest_status = reply.status
             latest_at = reply_ts
+            latest_kind = "reply_sent" if reply.status == "sent" else "reply_pending"
         else:
             summary = (
                 latest_email.summary_cn
@@ -171,6 +172,7 @@ def _conversation_rows(
             )
             latest_status = reply.status if reply else None
             latest_at = email_ts
+            latest_kind = "email"
 
         if keyword:
             kw = keyword.lower()
@@ -215,6 +217,7 @@ def _conversation_rows(
                 "summary_cn": summary,
                 "latest_status": latest_status,
                 "latest_at": _fmt(latest_at),
+                "latest_kind": latest_kind,
                 "sla_deadline": _fmt(deadline),
                 "sla_breached": bool(deadline and now > deadline),
                 "sla_near": bool(
@@ -289,6 +292,9 @@ async def inbox_counts(
 
     return ok(
         {
+            "unread": len(
+                _conversation_rows(db, risk_level=None, status=None, keyword=None, unread_only=True)
+            ),
             "pending_review": len(
                 _conversation_rows(db, risk_level=None, status="pending_review", keyword=None)
             ),
@@ -310,12 +316,30 @@ async def inbox_unread_count(
     _user=Depends(require_owner),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Conversations with at least one unread email (not raw email count)."""
+    """Unread email totals for the navigation badge.
 
+    ``unread_emails`` is the number of individual unread customer emails and
+    ``unread`` / ``unread_conversations`` keep the older conversation-level
+    meaning for the inbox「未读」tab and any existing API consumers.
+    """
+
+    unread_emails = db.scalar(
+        select(func.count(Email.id)).where(
+            Email.is_read.is_(False), Email.is_ad.is_(False)
+        )
+    ) or 0
     convs = db.execute(
-        select(Email.conversation_id).where(Email.is_read.is_(False)).distinct()
+        select(Email.conversation_id)
+        .where(Email.is_read.is_(False), Email.is_ad.is_(False))
+        .distinct()
     ).all()
-    return ok({"unread": len(convs)})
+    return ok(
+        {
+            "unread": len(convs),
+            "unread_conversations": len(convs),
+            "unread_emails": unread_emails,
+        }
+    )
 
 
 @router.post("/inbox/{email_id}/read")

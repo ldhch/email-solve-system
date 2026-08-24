@@ -32,6 +32,7 @@ from app.models.reply import Reply
 from app.models.system_state import SystemState
 from app.models.ticket import Ticket
 from app.services.alerting import AlertingService
+from app.services.acknowledgment import resolve_review_tickets
 from app.services.audit import log_action, utcnow
 from app.services.ingest import IngestService
 from app.services.mailer import MailerService
@@ -294,6 +295,18 @@ class SchedulerService:
         cutoff = utcnow() - timedelta(hours=RETENTION_TIMEOUT_HOURS)
         factory = self._factory()
         with factory() as db:
+            state = db.get(SystemState, 1)
+            if state is not None and state.ai_paused:
+                return
+            sender_whitelist = None
+            if state is not None and state.test_mode:
+                sender_whitelist = {
+                    w.strip().lower()
+                    for w in (state.test_whitelist or "").split(",")
+                    if w.strip()
+                }
+                if not sender_whitelist:
+                    return
             stale = db.execute(
                 select(Reply).where(
                     Reply.reply_type == "retention_compensation",
@@ -311,6 +324,11 @@ class SchedulerService:
                     email = db.get(Email, reply.email_id)
                     conversation = db.get(Conversation, reply.conversation_id)
                     if email is None or conversation is None:
+                        continue
+                    if (
+                        sender_whitelist is not None
+                        and email.from_email.lower() not in sender_whitelist
+                    ):
                         continue
                     if reply.id not in _alerted_retention_reply_ids:
                         alerting.send_alert(
@@ -354,6 +372,7 @@ class SchedulerService:
                         # The compensation draft is superseded so the boss can
                         # no longer approve it and double-send (edge case 22).
                         reply.status = "superseded"
+                        resolve_review_tickets(db, conversation.id)
                     log_action(
                         db,
                         "retention_auto_released",

@@ -66,6 +66,42 @@ def _conversation(db, customer_id: int, last_activity_at) -> Conversation:
     return conv
 
 
+def _stale_compensation_draft(db, from_email: str) -> tuple[Email, Reply]:
+    """Seed one pending_review compensation draft older than 24h."""
+
+    customer = Customer(
+        email=from_email, display_name="C", created_at=utcnow()
+    )
+    db.add(customer)
+    db.flush()
+    conv = _conversation(db, customer.id, utcnow() - timedelta(days=2))
+    email = Email(
+        conversation_id=conv.id,
+        message_id=f"<{from_email}-m@example.com>",
+        subject="Refund",
+        from_email=from_email,
+        to_email="bot@example.com",
+        body_text="I want a refund.",
+        is_inbound=True,
+        received_at=utcnow() - timedelta(days=2),
+    )
+    db.add(email)
+    db.flush()
+    draft = Reply(
+        conversation_id=conv.id,
+        email_id=email.id,
+        message_id=f"<{from_email}-draft@example.com>",
+        in_reply_to=f"<{from_email}-m@example.com>",
+        content_en="We can offer compensation.",
+        status="pending_review",
+        reply_type="retention_compensation",
+        created_at=utcnow() - timedelta(hours=25),
+    )
+    db.add(draft)
+    db.flush()
+    return email, draft
+
+
 def test_auto_close_sessions_job(db, session_factory, settings) -> None:
     customer = Customer(
         email="c@example.com", display_name="C", created_at=utcnow()
@@ -203,6 +239,99 @@ def test_retention_timeout_alerts_and_auto_releases(
 
     audit_actions = {a.action for a in db.execute(select(AuditLog)).scalars().all()}
     assert {"retention_timeout_alert", "retention_auto_released"} <= audit_actions
+    _alerted_retention_reply_ids.clear()
+
+
+def test_retention_timeout_skipped_while_paused(
+    db, session_factory, settings, monkeypatch, fake_smtp_class
+) -> None:
+    state = db.get(SystemState, 1)
+    state.ai_paused = True
+    db.commit()
+    _stale_compensation_draft(db, "c@example.com")
+    db.commit()
+
+    alerts = _capture_alerts(monkeypatch)
+    SchedulerService(
+        settings, session_factory=session_factory, smtp_class=FakeSMTP
+    )._job_retention_timeout_scan()
+
+    assert alerts == []
+    drafts = db.execute(
+        select(Reply).where(Reply.reply_type == "retention_compensation")
+    ).scalars().all()
+    assert len(drafts) == 1
+    assert drafts[0].status == "pending_review"
+    assert db.execute(select(Reply).where(Reply.reply_type == "retention_release")).scalars().all() == []
+    _alerted_retention_reply_ids.clear()
+
+
+def test_retention_timeout_respects_test_mode_whitelist(
+    db, session_factory, settings, monkeypatch, fake_smtp_class
+) -> None:
+    state = db.get(SystemState, 1)
+    state.test_mode = True
+    state.test_whitelist = "allowed@example.com"
+    db.commit()
+    _stale_compensation_draft(db, "blocked@example.com")
+    db.commit()
+
+    alerts = _capture_alerts(monkeypatch)
+    SchedulerService(
+        settings, session_factory=session_factory, smtp_class=FakeSMTP
+    )._job_retention_timeout_scan()
+
+    assert alerts == []
+    drafts = db.execute(
+        select(Reply).where(Reply.reply_type == "retention_compensation")
+    ).scalars().all()
+    assert len(drafts) == 1
+    assert drafts[0].status == "pending_review"
+    assert db.execute(select(Reply).where(Reply.reply_type == "retention_release")).scalars().all() == []
+    _alerted_retention_reply_ids.clear()
+
+
+def test_retention_timeout_empty_whitelist_skips_all(
+    db, session_factory, settings, monkeypatch, fake_smtp_class
+) -> None:
+    state = db.get(SystemState, 1)
+    state.test_mode = True
+    state.test_whitelist = ""
+    db.commit()
+    _stale_compensation_draft(db, "c@example.com")
+    db.commit()
+
+    alerts = _capture_alerts(monkeypatch)
+    SchedulerService(
+        settings, session_factory=session_factory, smtp_class=FakeSMTP
+    )._job_retention_timeout_scan()
+
+    assert alerts == []
+    assert db.execute(select(Reply).where(Reply.reply_type == "retention_release")).scalars().all() == []
+    _alerted_retention_reply_ids.clear()
+
+
+def test_retention_timeout_allows_whitelisted_sender(
+    db, session_factory, settings, monkeypatch, fake_smtp_class
+) -> None:
+    state = db.get(SystemState, 1)
+    state.test_mode = True
+    state.test_whitelist = "c@example.com"
+    db.commit()
+    _stale_compensation_draft(db, "c@example.com")
+    db.commit()
+
+    alerts = _capture_alerts(monkeypatch)
+    SchedulerService(
+        settings, session_factory=session_factory, smtp_class=FakeSMTP
+    )._job_retention_timeout_scan()
+
+    assert any("补偿挽留" in title for title, _ in alerts)
+    releases = db.execute(
+        select(Reply).where(Reply.reply_type == "retention_release")
+    ).scalars().all()
+    assert len(releases) == 1
+    assert releases[0].status == "sent"
     _alerted_retention_reply_ids.clear()
 
 

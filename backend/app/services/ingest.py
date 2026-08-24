@@ -40,6 +40,7 @@ from app.models.reply import Reply
 from app.models.system_state import SystemState
 from app.models.ticket import Ticket
 from app.services.audit import log_action, utcnow
+from app.services.acknowledgment import AcknowledgmentService
 from app.services.alerting import record_imap_failure, record_imap_success
 from app.services.blocked_senders import sender_is_blocked
 from app.services.classifier import (
@@ -416,6 +417,12 @@ class IngestService:
         self.classifier = ClassifierService(settings, self.llm_client)
         self.replier = ReplierService(db, settings, self.llm_client)
         self.retention = RetentionService(db, settings, self.llm_client)
+        self.acknowledgments = AcknowledgmentService(
+            db,
+            settings,
+            mailer=self.mailer,
+            replier=self.replier,
+        )
         # UIDVALIDITY of the mailbox on the current poll (see _read_uidvalidity).
         self._current_uidvalidity: str | None = None
 
@@ -785,7 +792,12 @@ class IngestService:
         if classification.category == "refund_request":
             return self._run_retention_flow(parsed, email_row, conversation, classification)
 
-        action = resolve_action(classification.risk_level, classification.category)
+        action = resolve_action(
+            classification.risk_level,
+            classification.category,
+            confidence=classification.confidence,
+            min_confidence=self.settings.auto_send_min_confidence,
+        )
         if action == "review":
             return self._draft_for_review(parsed, email_row, conversation, classification)
         if action == "auto_send":
@@ -881,6 +893,7 @@ class IngestService:
 
     def _manual(self, parsed, email_row, conversation, classification) -> ProcessingResult:
         log_action(self.db, "requires_manual", "email", email_row.id, actor_id=None)
+        self.acknowledgments.send_for_email(email_row, conversation)
         self.db.commit()
         return ProcessingResult(
             message_id=parsed.message_id,
@@ -911,6 +924,7 @@ class IngestService:
         )
         reply.low_confidence = True
         log_action(self.db, "requires_review_low_confidence", "reply", reply.id)
+        self.acknowledgments.send_for_email(email_row, conversation)
         self.db.commit()
         return ProcessingResult(
             message_id=parsed.message_id,
@@ -1028,6 +1042,7 @@ class IngestService:
             status="pending_review",
         )
         log_action(self.db, "requires_review", "reply", reply.id)
+        self.acknowledgments.send_for_email(email_row, conversation)
         self.db.commit()
         return ProcessingResult(
             message_id=parsed.message_id,
@@ -1167,6 +1182,7 @@ class IngestService:
             )
             conversation.retention_attempts += 1
             log_action(self.db, "retention_draft_created", "reply", reply.id)
+            self.acknowledgments.send_for_email(email_row, conversation)
             self.db.commit()
             return ProcessingResult(
                 message_id=parsed.message_id,
@@ -1387,6 +1403,9 @@ class IngestService:
                 latest = self._latest_of(results)
                 if latest is not None:
                     latest.pending_after_pause = True
+            elif outcome == "manual":
+                summary["manual"] += 1
+                self._set_pending_flag(results, False)
             else:  # generation_failed: keep every batch email queued for retry
                 summary["failed"] += 1
         self.db.commit()
@@ -1476,6 +1495,42 @@ class IngestService:
         latest = emails[-1]
         uid_by_message_id = {r.message_id: r.uid for r in results}
         latest_uid = uid_by_message_id.get(latest.message_id)
+
+        has_open_ticket = (
+            self.db.execute(
+                select(Ticket.id)
+                .where(
+                    Ticket.conversation_id == conversation.id,
+                    Ticket.is_deleted.is_(False),
+                    Ticket.status.in_(("pending", "in_progress")),
+                )
+                .limit(1)
+            ).scalars().first()
+            is not None
+        )
+        has_blocking_risk = (
+            self.db.execute(
+                select(Email.id)
+                .where(
+                    Email.conversation_id == conversation.id,
+                    Email.risk_level.in_(("high", "unknown")),
+                )
+                .limit(1)
+            ).scalars().first()
+            is not None
+        )
+        if has_open_ticket or has_blocking_risk:
+            for email in emails:
+                log_action(
+                    self.db,
+                    "requires_manual",
+                    "email",
+                    email.id,
+                    actor_id=None,
+                    commit=False,
+                )
+            self.db.commit()
+            return "manual", None
 
         try:
             content = self.replier.generate_aggregated(emails, conversation)
@@ -1665,6 +1720,8 @@ class IngestService:
                     summary["auto_sent"] += 1
                 elif outcome == "smtp_failed":
                     summary["failed"] += 1
+                elif outcome == "manual":
+                    summary["manual"] += 1
                 else:  # generation_failed: batch removed, retry everything
                     summary["failed"] += 1
             record_imap_success()

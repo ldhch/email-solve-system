@@ -47,6 +47,33 @@ DEFAULT_CHARGEBACK_KEYWORDS = [
     "platform complaint",
 ]
 
+# Deterministic fallback for the full high-risk set, not just chargeback.
+# The LLM is still the primary classifier, but any explicit threat keyword must
+# never be downgraded into an auto-send path by a mislabeled risk_level.
+DEFAULT_HIGH_RISK_KEYWORDS = [
+    "bad review",
+    "negative review",
+    "lawsuit",
+    "sue",
+    "lawyer",
+    "attorney",
+    "legal action",
+    "media",
+    "press",
+    "news outlet",
+    "account ban",
+    "ban my account",
+    "platform complaint",
+    "consumer protection",
+    "bbb",
+    "ftc",
+    "chargeback",
+    "dispute",
+    "credit card company",
+    "file a claim",
+    "bank claim",
+]
+
 # Marketing/newsletter/promotional markers for the keyword channel. Deliberately
 # avoids bare "unsubscribe" (a customer asking "please unsubscribe me" must hit
 # SILENCE_KEYWORDS instead, not be archived as an ad); the LLM channel catches
@@ -143,33 +170,33 @@ class Classification:
     is_ad: bool = False  # marketing/newsletter/promotional mail
 
 
-RISK_ACTIONS = {
-    "high": "escalate",
-    "low": "auto_send",
-    "medium": "review",
-    "medium:logistics_inquiry": "escalate",
-    "medium:order_modification": "escalate",
-    "medium:invoice": "escalate",
-    "medium:policy": "auto_send",
-    "medium:warranty": "auto_send",
-    "medium:product_spec": "auto_send",
-    "medium:usage": "auto_send",
-}
-
-# Refund/return/exchange must never auto-send in Phase 1: the retention flow
-# (Phase 2) owns that decision. Anything else low-risk may auto-send.
-NO_AUTO_SEND_CATEGORIES = {"refund_request"}
+# Only clearly safe consultation categories are eligible for auto-send.
+AUTO_SEND_CATEGORIES = {"product_spec", "usage", "gratitude"}
+MANUAL_CATEGORIES = {"logistics_inquiry", "order_modification", "invoice"}
 
 
-def resolve_action(risk_level: str, category: str) -> str:
-    """Map a classification to a Phase-1 pipeline action."""
+def resolve_action(
+    risk_level: str,
+    category: str,
+    confidence: float | None = None,
+    min_confidence: float = 0.8,
+) -> str:
+    """Map a classification to a pipeline action (conservative by default)."""
 
     if risk_level in ("high", "unknown"):
         return "escalate"
     if risk_level == "medium":
-        return RISK_ACTIONS.get(f"medium:{category}", RISK_ACTIONS["medium"])
+        if category in MANUAL_CATEGORIES or category == "refund_request":
+            return "escalate"
+        return "review"
     if risk_level == "low":
-        return "auto_send" if category not in NO_AUTO_SEND_CATEGORIES else "escalate"
+        if confidence is not None and confidence < min_confidence:
+            return "review"
+        if category in AUTO_SEND_CATEGORIES:
+            return "auto_send"
+        if category in MANUAL_CATEGORIES or category == "refund_request":
+            return "escalate"
+        return "review"
     return "escalate"
 
 
@@ -181,6 +208,10 @@ class ClassifierService:
         self.llm_client = llm_client
         keywords = settings.chargeback_keyword_list or DEFAULT_CHARGEBACK_KEYWORDS
         self.chargeback_keywords = [k.lower() for k in keywords]
+        high_risk_keywords = (
+            settings.high_risk_keyword_list or DEFAULT_HIGH_RISK_KEYWORDS
+        )
+        self.high_risk_keywords = [k.lower() for k in high_risk_keywords]
         self.ad_keywords = [k.lower() for k in AD_KEYWORDS]
         self.system_prompt = _load_prompt()
 
@@ -252,14 +283,15 @@ class ClassifierService:
             category = "other"
 
         keyword_hit = self._keyword_hit(user_content, self.chargeback_keywords)
+        high_risk_hit = self._keyword_hit(user_content, self.high_risk_keywords)
         llm_flag = bool(data.get("chargeback_risk", False))
         chargeback_risk = keyword_hit or llm_flag
 
-        if chargeback_risk:
+        if high_risk_hit or llm_flag or risk == "high":
             risk = "high"
             logger.warning(
-                "Chargeback risk detected (keyword=%s llm=%s) for %s",
-                keyword_hit,
+                "High risk detected (keyword=%s llm=%s) for %s",
+                high_risk_hit,
                 llm_flag,
                 parsed_email.message_id,
             )

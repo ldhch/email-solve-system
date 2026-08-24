@@ -108,6 +108,12 @@ def test_chargeback_gets_reassurance_and_ticket(db, settings, fake_smtp_class, f
     assert reply.reply_type == "reassurance"
     assert reply.status == "sent"
     assert "24 hours" in reply.content_en
+    assert (
+        db.execute(
+            select(Reply).where(Reply.reply_type == "acknowledgment")
+        ).scalars().all()
+        == []
+    )
     assert FakeSMTP.instances and FakeSMTP.instances[0].sent
 
     ticket = db.execute(select(Ticket)).scalar_one()
@@ -143,7 +149,7 @@ def test_high_risk_smtp_failure_keeps_email_unseen_but_creates_ticket(
     assert imap.seen == []  # retry the same draft next poll, no duplicate ticket
 
 
-def test_unknown_risk_low_confidence_draft_no_reassurance_no_ticket(
+def test_unknown_risk_low_confidence_draft_creates_ack_and_review_ticket(
     db, settings, fake_smtp_class, fake_imap
 ) -> None:
     raw = make_raw_email(
@@ -170,10 +176,18 @@ def test_unknown_risk_low_confidence_draft_no_reassurance_no_ticket(
     assert summary["manual"] == 0
     email = db.execute(select(Email)).scalar_one()
     assert email.risk_level == "unknown"
-    reply = db.execute(select(Reply)).scalar_one()
+    reply = db.execute(
+        select(Reply).where(Reply.status == "pending_review")
+    ).scalars().one()
     assert reply.status == "pending_review"
     assert reply.low_confidence is True
-    assert db.execute(select(Ticket)).scalars().all() == []
+    ack = db.execute(
+        select(Reply).where(Reply.reply_type == "acknowledgment")
+    ).scalars().one()
+    assert ack.status == "sent"
+    tickets = db.execute(select(Ticket)).scalars().all()
+    assert len(tickets) == 1
+    assert tickets[0].risk_level == "medium"
 
 
 def test_refund_size_goes_through_retention_exchange(
@@ -196,7 +210,7 @@ def test_refund_size_goes_through_retention_exchange(
     assert conversation.retention_attempts == 1
 
 
-def test_policy_consultation_auto_sends_after_boss_decision(
+def test_policy_consultation_reviews_under_conservative_policy(
     db, settings, fake_smtp_class, fake_imap
 ) -> None:
     raw = make_raw_email(
@@ -207,14 +221,20 @@ def test_policy_consultation_auto_sends_after_boss_decision(
     imap = fake_imap([("8", raw)])
     summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
 
-    assert summary["auto_sent"] == 1
+    assert summary["review"] == 1
     email = db.execute(select(Email)).scalar_one()
-    # Mock now mirrors the real classifier: policy consult is low risk.
     assert email.risk_level == "low"
     assert email.category == "policy"
-    reply = db.execute(select(Reply)).scalar_one()
-    assert reply.status == "sent"
+    reply = db.execute(
+        select(Reply).where(Reply.status == "pending_review")
+    ).scalars().one()
+    assert reply.status == "pending_review"
     assert reply.reply_type == "general"
+    ack = db.execute(
+        select(Reply).where(Reply.reply_type == "acknowledgment")
+    ).scalars().one()
+    assert ack.status == "sent"
+    assert len(FakeSMTP.instances[0].sent) == 1
 
 
 def test_medium_other_still_goes_to_review(
@@ -240,9 +260,117 @@ def test_medium_other_still_goes_to_review(
     summary = service.fetch_and_process()
 
     assert summary["review"] == 1
-    reply = db.execute(select(Reply)).scalar_one()
+    reply = db.execute(
+        select(Reply).where(Reply.status == "pending_review")
+    ).scalars().one()
     assert reply.status == "pending_review"
-    assert FakeSMTP.instances == []  # nothing sent without approval
+    ack = db.execute(
+        select(Reply).where(Reply.reply_type == "acknowledgment")
+    ).scalars().one()
+    assert ack.status == "sent"
+    assert len(FakeSMTP.instances[0].sent) == 1  # only the ack is sent
+
+
+def test_low_invoice_is_never_auto_sent(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    raw = make_raw_email(
+        subject="Invoice request",
+        body="Please send me an invoice for my order.",
+        message_id="<e2e-low-invoice@example.com>",
+    )
+    imap = fake_imap([("20", raw)])
+    service = IngestService(
+        db,
+        settings,
+        llm_client=ScriptedLLM(
+            settings,
+            '{"risk_level":"low","confidence":0.95,"category":"invoice",'
+            '"chargeback_risk":false,"summary_cn":"低风险发票"}',
+        ),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    summary = service.fetch_and_process()
+
+    assert summary["manual"] == 1
+    general = db.execute(
+        select(Reply).where(Reply.reply_type == "general")
+    ).scalars().all()
+    assert general == []
+    ack = db.execute(
+        select(Reply).where(Reply.reply_type == "acknowledgment")
+    ).scalars().one()
+    assert ack.status == "sent"
+    assert len(FakeSMTP.instances[0].sent) == 1
+
+
+def test_low_other_is_never_auto_sent(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    raw = make_raw_email(
+        subject="Unclear request",
+        body="This is not a clear simple question.",
+        message_id="<e2e-low-other@example.com>",
+    )
+    imap = fake_imap([("21", raw)])
+    service = IngestService(
+        db,
+        settings,
+        llm_client=ScriptedLLM(
+            settings,
+            '{"risk_level":"low","confidence":0.95,"category":"other",'
+            '"chargeback_risk":false,"summary_cn":"无法归类"}',
+        ),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    summary = service.fetch_and_process()
+
+    assert summary["review"] == 1
+    reply = db.execute(
+        select(Reply).where(Reply.status == "pending_review")
+    ).scalars().one()
+    assert reply.status == "pending_review"
+    ack = db.execute(
+        select(Reply).where(Reply.reply_type == "acknowledgment")
+    ).scalars().one()
+    assert ack.status == "sent"
+    assert len(FakeSMTP.instances[0].sent) == 1
+
+
+def test_low_product_spec_low_confidence_reviews(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    raw = make_raw_email(
+        subject="Product question",
+        body="What is the size?",
+        message_id="<e2e-low-confidence@example.com>",
+    )
+    imap = fake_imap([("22", raw)])
+    service = IngestService(
+        db,
+        settings,
+        llm_client=ScriptedLLM(
+            settings,
+            '{"risk_level":"low","confidence":0.7,"category":"product_spec",'
+            '"chargeback_risk":false,"summary_cn":"低置信度咨询"}',
+        ),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    summary = service.fetch_and_process()
+
+    assert summary["review"] == 1
+    reply = db.execute(
+        select(Reply).where(Reply.status == "pending_review")
+    ).scalars().one()
+    assert reply.status == "pending_review"
+    ack = db.execute(
+        select(Reply).where(Reply.reply_type == "acknowledgment")
+    ).scalars().one()
+    assert ack.status == "sent"
+    assert len(FakeSMTP.instances[0].sent) == 1
 
 
 def test_refund_compensation_draft_waits_for_owner(
@@ -257,12 +385,18 @@ def test_refund_compensation_draft_waits_for_owner(
     summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
 
     assert summary["review"] == 1
-    reply = db.execute(select(Reply)).scalar_one()
+    reply = db.execute(
+        select(Reply).where(Reply.reply_type == "retention_compensation")
+    ).scalars().one()
     assert reply.status == "pending_review"
     assert reply.reply_type == "retention_compensation"
     conversation = db.get(Conversation, reply.conversation_id)
     assert conversation.retention_attempts == 1
-    assert FakeSMTP.instances == []
+    ack = db.execute(
+        select(Reply).where(Reply.reply_type == "acknowledgment")
+    ).scalars().one()
+    assert ack.status == "sent"
+    assert len(FakeSMTP.instances[0].sent) == 1
 
 
 def test_refund_quality_handled_directly_no_retention(

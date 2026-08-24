@@ -112,8 +112,8 @@ def test_different_conversations_get_one_reply_each(
         message_id="<topic-a@example.com>",
     )
     raw2 = make_raw_email(
-        subject="Warranty question",
-        body="Is the warranty still valid?",
+        subject="Color question",
+        body="What colors are available for this product?",
         message_id="<topic-b@example.com>",
     )
     imap = fake_imap([("1", raw1), ("2", raw2)])
@@ -122,7 +122,7 @@ def test_different_conversations_get_one_reply_each(
     assert len(db.execute(select(Reply)).scalars().all()) == 2
 
 
-def test_high_plus_low_same_conversation_keeps_per_branch_semantics(
+def test_high_plus_low_same_conversation_blocks_low_auto_send(
     db, settings, fake_smtp_class, fake_imap
 ) -> None:
     raw1 = make_raw_email(
@@ -138,12 +138,12 @@ def test_high_plus_low_same_conversation_keeps_per_branch_semantics(
     imap = fake_imap([("1", raw1), ("2", raw2)])
     summary = _service(db, settings, imap).fetch_and_process()
 
-    # High-risk keeps its per-mail reassurance; the low-risk mail is still
-    # auto-answered once (aggregation only applies to the auto_send branch).
+    # High-risk keeps its per-mail reassurance; the low-risk mail must not be
+    # auto-answered while the same conversation has an open high-risk ticket.
     assert summary["reassured"] == 1
-    assert summary["auto_sent"] == 1
+    assert summary["manual"] == 1
     reply_types = {r.reply_type for r in db.execute(select(Reply)).scalars().all()}
-    assert reply_types == {"reassurance", "general"}
+    assert reply_types == {"reassurance"}
 
 
 def test_smtp_failure_keeps_aggregated_reply_and_retries_same_draft(

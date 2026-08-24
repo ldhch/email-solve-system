@@ -61,6 +61,7 @@ def test_audit_logs_list_paginated_newest_first(
         actions = [item["action"] for item in data["items"]]
         assert actions == ["login", "qa_updated", "ticket_updated", "reply_sent"]
         assert data["items"][0]["at"].endswith("Z")
+        assert data["items"][0]["actor_name"] == settings.owner_username
 
         page2 = api(client, "GET", "/api/v1/audit-logs", params={"page": 2, "size": 4})
         assert [item["action"] for item in page2.json()["data"]["items"]] == [

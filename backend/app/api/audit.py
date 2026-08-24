@@ -12,6 +12,7 @@ from app.api.auth import require_owner
 from app.api.common import ok
 from app.db.session import get_db
 from app.models.audit import AuditLog
+from app.models.user import User
 
 router = APIRouter(prefix="/api/v1", tags=["audit"])
 
@@ -57,6 +58,11 @@ async def list_audit_logs(
         {
             "id": row.id,
             "actor_id": row.actor_id,
+            "actor_name": (
+                db.get(User, row.actor_id).username
+                if row.actor_id is not None and db.get(User, row.actor_id) is not None
+                else None
+            ),
             "action": row.action,
             "resource_type": row.resource_type,
             "resource_id": row.resource_id,

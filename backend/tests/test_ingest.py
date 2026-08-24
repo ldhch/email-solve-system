@@ -261,9 +261,15 @@ def test_process_one_unknown_creates_low_confidence_draft(db, settings) -> None:
     result = _service(db, settings, _LowConfidenceClassifier(settings)).process_one(parsed)
     assert result.action == "review"
     assert result.risk_level == "unknown"
-    reply = db.execute(select(Reply)).scalars().one()
+    reply = db.execute(
+        select(Reply).where(Reply.status == "pending_review")
+    ).scalars().one()
     assert reply.status == "pending_review"
     assert reply.low_confidence is True
+    ack = db.execute(
+        select(Reply).where(Reply.reply_type == "acknowledgment")
+    ).scalars().one()
+    assert ack.status == "sent"
 
 
 def test_process_one_empty_body_stays_manual(db, settings) -> None:
@@ -275,7 +281,10 @@ def test_process_one_empty_body_stays_manual(db, settings) -> None:
     result = _service(db, settings, _LowConfidenceClassifier(settings)).process_one(parsed)
     assert result.action == "manual"
     assert result.risk_level == "unknown"
-    assert db.execute(select(Reply)).scalars().all() == []
+    ack = db.execute(
+        select(Reply).where(Reply.reply_type == "acknowledgment")
+    ).scalars().one()
+    assert ack.status == "sent"
 
 
 # ---------- 测试模式 (test mode / sender whitelist) ----------
