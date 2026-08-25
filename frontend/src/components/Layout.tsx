@@ -31,9 +31,6 @@ export function Layout({ children }: { children: ReactNode }) {
               <NavLink to="/tickets" className={linkCls}>
                 工单
               </NavLink>
-              <NavLink to="/review" className={linkCls}>
-                待审核
-              </NavLink>
               <NavLink to="/blocked" className={linkCls}>
                 黑名单
               </NavLink>

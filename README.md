@@ -152,7 +152,7 @@ LLM_PROVIDER=mock python -m app.cli simulate --reason not_wanted --dry-run # 犹
 LLM_PROVIDER=mock python -m app.cli simulate --reason quality --dry-run    # 质量问题 → 不挽留，照单退换
 ```
 
-然后登录后台（`http://localhost:5173`）查看收件箱、**待审核工作台**、会话时间轴、工单、知识库、标准问答、设置与审计日志。
+然后登录后台（`http://localhost:5173`）查看收件箱（含「待审核」页签）、会话时间轴、工单、知识库、标准问答、设置与审计日志。
 
 ### 4.2 真实邮箱完整链路（DeepSeek + Titan）
 

@@ -7,7 +7,6 @@ import Inbox from "./pages/Inbox";
 import KnowledgeBase from "./pages/KnowledgeBase";
 import Login from "./pages/Login";
 import QAPairs from "./pages/QAPairs";
-import ReviewQueue from "./pages/ReviewQueue";
 import Settings from "./pages/Settings";
 import Templates from "./pages/Templates";
 import Tickets from "./pages/Tickets";
@@ -19,7 +18,6 @@ export default function App() {
       <Route element={<RequireAuth />}>
         <Route path="/inbox" element={<Inbox />} />
         <Route path="/tickets" element={<Tickets />} />
-        <Route path="/review" element={<ReviewQueue />} />
         <Route path="/blocked" element={<BlockedSenders />} />
         <Route path="/templates" element={<Templates />} />
         <Route path="/knowledge" element={<KnowledgeBase />} />

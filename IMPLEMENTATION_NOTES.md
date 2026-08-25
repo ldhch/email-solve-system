@@ -7,12 +7,12 @@
 ## 收尾调整（2026-08-25：统一待审核草稿 + 待审核工作台）
 
 - **所有「其它风险」统一为可审草稿**：中风险物流 `logistics_inquiry` / 改单 `order_modification` / 发票 `invoice` 从「纯人工（只发固定回执，老板从零写）」改为 `_draft_for_review`——AI 拟稿进 `pending_review`，老板审核/修改后发送；固定回执与 medium 工单照旧。低风险 auto_send（`product_spec` / `usage` / `gratitude`）不变，仍是 AI 直接发。
-- **高风险工单自动预生成建议回复草稿**：`_handle_high_risk` 在安抚信发出、工单创建后，用 replier 生成一份正式回复草稿（`reply_type=review`、`status=pending_review`、中英双写），老板在待审工作台/工单里审核、修改、发送，审计 `high_review_draft`；生成失败独立事务回滚、不影响已提交的工单。安抚信「立即发」与 24h SLA 工单语义不变。
-- **待审核工作台**：新增 `GET /api/v1/review-queue` 聚合所有 `pending_review` 草稿（中风险 + 高风险建议稿 + 低置信度），每行带会话风险等级（high 优先）/等待时长/来信摘要；前端新页面 `/review` 一页集中审核（通过/驳回/打开会话编辑），导航加「待审核」入口。
+- **高风险工单自动预生成建议回复草稿**：`_handle_high_risk` 在安抚信发出、工单创建后，用 replier 生成一份正式回复草稿（`reply_type=review`、`status=pending_review`、中英双写），老板在收件箱「待审核」页签/工单里审核、修改、发送，审计 `high_review_draft`；生成失败独立事务回滚、不影响已提交的工单。安抚信「立即发」与 24h SLA 工单语义不变。
 - **普通待审草稿超时告警**：scheduler 新增 `review_timeout_scan` job（每 30 分钟），普通 `pending_review` 草稿 >24h 未审告警老板（审计 `review_overdue_alert`，进程内去重，**不自动发送**）；仅 `retention_compensation` 超时仍走自动放行（原 job）。
 - **中英文约束**：所有草稿 `content_cn`（后台中文显示、可切英文原文）+ `content_en`（发送必用英文）双写；老板只改中文，保存时后端自动重译英文（`PUT /replies/{id}`）。
 - **Shopify ERP 预留**：草稿生成统一走 `ReplierService.generate`，未来接 ERP 时在生成链路注入订单/物流上下文即可；当前无订单数据标「未确认信息，请人工核实」，不做「订单数据永远不存在」的硬编码。
-- **涉及文件**：`services/{ingest,scheduler}.py`、`api/inbox.py`、`frontend/src/pages/ReviewQueue.tsx`、`frontend/src/{App.tsx}`、`frontend/src/components/Layout.tsx`、`frontend/src/pages/AuditLogs.tsx`、`tests/{test_pipeline,test_admin_api,test_e2e_exceptions,test_aggregation}.py`。
+- **待审核工作台已移除（定稿）**：导航「待审核」页面（`/review`）与 `GET /api/v1/review-queue` 接口不再保留——草稿审核统一走收件箱「待审核」页签（会话维度，上下文完整）；「无法判定」页签保留（筛 unknown 风险会话，其中纯人工兜底会话无草稿、只在彼处可见）。
+- **涉及文件**：`services/{ingest,scheduler}.py`、`api/inbox.py`、`frontend/src/components/Layout.tsx`、`frontend/src/pages/AuditLogs.tsx`、`tests/{test_pipeline,test_admin_api,test_e2e_exceptions,test_aggregation}.py`。
 
 ## 收尾调整（2026-08-24）
 
