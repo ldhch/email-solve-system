@@ -537,6 +537,44 @@ def test_retention_attempt_limit_releases_return(
     assert conversation.retention_attempts == 2  # unchanged: released, no new offer
 
 
+def test_released_conversation_gets_review_draft_for_next_request(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    """After a release reply, a further refund request yields a reviewable
+    draft instead of going pure manual — the boss approves/edits/sends rather
+    than writing from scratch, and the release is never auto-spammed."""
+
+    first = make_raw_email(
+        subject="Defective",
+        body="The product I received is defective. I want my money back.",
+        message_id="<rel-1@example.com>",
+    )
+    imap = fake_imap([("5", first)])
+    service = _service(db, settings, imap, FakeSMTP)
+    first_summary = service.fetch_and_process()
+    assert first_summary["auto_sent"] == 1
+    release = db.execute(
+        select(Reply).where(Reply.reply_type == "retention_release")
+    ).scalar_one()
+    assert release.status == "sent"
+
+    second = make_raw_email(
+        subject="Re: refund",
+        body="I still want my refund for order US2828, please confirm.",
+        message_id="<rel-2@example.com>",
+        in_reply_to="<rel-1@example.com>",
+    )
+    imap2 = fake_imap([("6", second)])
+    service2 = _service(db, settings, imap2, FakeSMTP)
+    second_summary = service2.fetch_and_process()
+    assert second_summary["review"] == 1
+    draft = db.execute(
+        select(Reply).where(Reply.status == "pending_review")
+    ).scalar_one()
+    assert draft.reply_type == "general"
+    assert draft.source == "system"
+
+
 def test_generation_failure_rolls_back_and_can_retry(
     db, settings, fake_imap
 ) -> None:

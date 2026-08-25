@@ -1127,9 +1127,10 @@ class IngestService:
             # rejected/uncertain: the pending offer already counts toward the
             # attempt limit, so the next round may already release the return.
         elif self.retention.is_released(conversation.id):
-            # Return instructions were already sent; further refund requests go
-            # to the boss instead of spamming the same reply.
-            return self._manual(parsed, email_row, conversation, classification)
+            # Return instructions were already sent; further refund requests get
+            # a reviewable draft so the boss approves/edits/sends instead of
+            # writing from scratch — never auto-spams the same release reply.
+            return self._draft_for_review(parsed, email_row, conversation, classification)
 
         reason = self.retention.classify_reason(body)
         strategy = self.retention.resolve_strategy(reason, conversation.retention_attempts)
