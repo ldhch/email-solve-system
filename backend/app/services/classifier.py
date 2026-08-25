@@ -58,8 +58,9 @@ DEFAULT_HIGH_RISK_KEYWORDS = [
     "lawyer",
     "attorney",
     "legal action",
-    "media",
-    "press",
+    "to the media",  # threat context only ("go to / talk to / contact the media")
+    "to the press",  # threat context only ("go to / contact the press")
+    "bad press",
     "news outlet",
     "account ban",
     "ban my account",
@@ -140,10 +141,15 @@ Rules:
 - product specs, usage questions, policy/warranty info, thanks: risk low.
 - is_advertisement: true for marketing/newsletter/promotional or spam mail
   (coupon codes, "you're receiving this email", unsubscribe links, sales promos),
-  and for third-party app notifications / stats / reports / product-update
-  broadcasts that carry no customer-service request (checkout stats, review
-  prompts, upsells). Order / tracking / payment transactional emails are NOT
-  advertisements even though they are automated.
+  for third-party app notifications / stats / reports / product-update broadcasts
+  that carry no customer-service request (checkout stats, review prompts,
+  upsells), for guest-post / sponsored-content / media-outlet pitch emails
+  (PR placement, link building, "opportunity for your website"), and for app /
+  TestFlight test invites and cold sales outreach.
+- Order / tracking / payment transactional emails are NOT advertisements even
+  though they are automated.
+- A customer email raising a support issue is NOT an advertisement even when it
+  comes from an automated system (a bad-review alert is high risk, never an ad).
 - If you cannot decide, use confidence < 0.5 and category "other".
 - Never invent facts. Do not output anything besides the JSON object.
 """
@@ -301,22 +307,27 @@ class ClassifierService:
                 parsed_email.message_id,
             )
 
-        ad_hit = self._keyword_hit(user_content, self.ad_keywords)
-        llm_ad = bool(data.get("is_advertisement", False))
-        is_ad = ad_hit or llm_ad
-        if is_ad:
-            logger.info(
-                "Advertisement detected (keyword=%s llm=%s) for %s",
-                ad_hit,
-                llm_ad,
-                parsed_email.message_id,
-            )
-
         if risk != "unknown" and confidence < self.settings.low_confidence_threshold:
             risk = "unknown"
             logger.info(
                 "Low confidence (%s) downgraded to manual for %s",
                 confidence,
+                parsed_email.message_id,
+            )
+
+        # The ad channel is advisory only: keyword/LLM hits propose, but
+        # high-risk or unclassifiable mail (complaints, bad-review threats,
+        # chargebacks) must never be archived into the ad tab. Automated system
+        # notifications carrying an unsubscribe footer (e.g. judge.me review
+        # alerts) are a classic trap for a bare "unsubscribe" keyword hit.
+        ad_hit = self._keyword_hit(user_content, self.ad_keywords)
+        llm_ad = bool(data.get("is_advertisement", False))
+        is_ad = (ad_hit or llm_ad) and risk not in ("high", "unknown")
+        if is_ad:
+            logger.info(
+                "Advertisement detected (keyword=%s llm=%s) for %s",
+                ad_hit,
+                llm_ad,
                 parsed_email.message_id,
             )
 
