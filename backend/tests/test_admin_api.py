@@ -1090,3 +1090,32 @@ def test_conversation_detail_marks_ad(settings, session_factory) -> None:
         assert detail.json()["data"]["is_ad"] is True
     finally:
         close_client(client)
+
+
+def test_review_queue_lists_pending_drafts(settings, session_factory) -> None:
+    ids = _seed_conversation(
+        session_factory,
+        emails=1,
+        reply={
+            "status": "pending_review",
+            "reply_type": "review",
+            "content_cn": "中文草稿",
+            "content_en": "English draft",
+        },
+    )
+    client = _authed_client(settings, session_factory)
+    try:
+        resp = api(client, "GET", "/api/v1/review-queue")
+        assert resp.status_code == 200
+        body = resp.json()["data"]
+        assert body["total"] == 1
+        item = body["items"][0]
+        assert item["reply_id"] == ids["reply_id"]
+        assert item["conversation_id"] == ids["conversation_id"]
+        assert item["content_cn"] == "中文草稿"
+        assert item["content_en"] == "English draft"
+        assert item["risk_level"] == "medium"  # from the conversation's email
+        assert item["low_confidence"] is False
+        assert item["waiting_hours"] >= 0
+    finally:
+        close_client(client)

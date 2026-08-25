@@ -325,6 +325,98 @@ async def inbox_counts(
     )
 
 
+@router.get("/review-queue")
+async def review_queue(
+    _user=Depends(require_owner),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Backs the「待审核工作台」page: every pending_review draft in one list.
+
+    Covers medium-risk drafts, high-risk follow-up suggestion drafts and
+    low-confidence drafts. Each row carries the conversation's risk level (same
+    highest-risk-wins rule as the inbox list) so the boss can triage approvals
+    — high-risk suggestions and low-confidence drafts get a visible tag.
+    """
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    replies = (
+        db.execute(
+            select(Reply)
+            .where(Reply.status == "pending_review")
+            .order_by(Reply.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+    if not replies:
+        return ok({"items": [], "total": 0})
+
+    conv_ids = {r.conversation_id for r in replies}
+    conversations = {
+        c.id: c
+        for c in db.execute(
+            select(Conversation).where(Conversation.id.in_(conv_ids))
+        ).scalars()
+    }
+    customers = {
+        c.id: c
+        for c in db.execute(
+            select(Customer).where(
+                Customer.id.in_(
+                    [conversations[cid].customer_id for cid in conversations]
+                )
+            )
+        ).scalars()
+    }
+    emails = db.execute(
+        select(Email).where(Email.conversation_id.in_(conv_ids))
+    ).scalars().all()
+    risk_by_conv: dict[int, str] = {}
+    for cid in conv_ids:
+        risks = [
+            e.risk_level
+            for e in emails
+            if e.conversation_id == cid and e.risk_level in _RISK_ORDER
+        ]
+        if "high" in risks:
+            risk_by_conv[cid] = "high"
+        elif "medium" in risks:
+            risk_by_conv[cid] = "medium"
+        elif "unknown" in risks:
+            risk_by_conv[cid] = "unknown"
+        elif "low" in risks:
+            risk_by_conv[cid] = "low"
+        else:
+            risk_by_conv[cid] = conversations[cid].risk_level
+
+    email_rows = {e.id: e for e in emails}
+    items = []
+    for r in replies:
+        email = email_rows.get(r.email_id)
+        conv = conversations.get(r.conversation_id)
+        customer = customers.get(conv.customer_id) if conv else None
+        items.append(
+            {
+                "reply_id": r.id,
+                "conversation_id": r.conversation_id,
+                "subject": email.subject if email else None,
+                "from_email": email.from_email if email else None,
+                "customer_name": customer.display_name if customer else None,
+                "content_cn": r.content_cn,
+                "content_en": r.content_en,
+                "reply_type": r.reply_type,
+                "low_confidence": r.low_confidence,
+                "source": r.source,
+                "risk_level": risk_by_conv.get(r.conversation_id, "unknown"),
+                "created_at": _fmt(r.created_at),
+                "waiting_hours": round(
+                    max(0.0, (now - r.created_at).total_seconds() / 3600), 1
+                ),
+            }
+        )
+    return ok({"items": items, "total": len(items)})
+
+
 @router.get("/inbox/unread-count")
 async def inbox_unread_count(
     _user=Depends(require_owner),

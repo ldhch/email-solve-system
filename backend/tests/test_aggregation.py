@@ -143,7 +143,8 @@ def test_high_plus_low_same_conversation_blocks_low_auto_send(
     assert summary["reassured"] == 1
     assert summary["manual"] == 1
     reply_types = {r.reply_type for r in db.execute(select(Reply)).scalars().all()}
-    assert reply_types == {"reassurance"}
+    # reassurance + the high-risk review draft; the low mail stays manual.
+    assert reply_types == {"reassurance", "review"}
 
 
 def test_smtp_failure_keeps_aggregated_reply_and_retries_same_draft(

@@ -30,6 +30,8 @@ const ACTION_LABEL: Record<string, string> = {
   ticket_resolved: "解决工单",
   ticket_updated: "更新工单",
   sla_overdue: "SLA 逾期",
+  high_review_draft: "高风险建议草稿",
+  review_overdue_alert: "待审超时告警",
   retention_auto_released: "自动放行退货",
   ack_sent: "已发送回执",
   ack_failed: "回执发送失败",

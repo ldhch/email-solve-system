@@ -810,7 +810,11 @@ class IngestService:
                     conversation_created=conversation_created,
                 )
             return self._auto_send(parsed, email_row, conversation, classification)
-        return self._manual(parsed, email_row, conversation, classification)
+        # `escalate` lands here for low/medium logistics / order-modification /
+        # invoice mail. These used to go straight to pure manual (fixed receipt
+        # only, boss writes from scratch); now they also get an AI draft so the
+        # boss reviews / edits / sends a real reply instead of writing it.
+        return self._draft_for_review(parsed, email_row, conversation, classification)
 
     def _handle_high_risk(
         self, parsed, email_row, conversation, classification
@@ -878,6 +882,40 @@ class IngestService:
             commit=False,
         )
         self.db.commit()
+
+        # Pre-generate a reviewable formal-reply draft for the ticket: the
+        # reassurance already went out, so this is the substantive reply the
+        # boss approves / edits / sends. Never auto-sent — high risk stays
+        # human-gated. A draft-generation failure must not lose the committed
+        # ticket, so it runs in its own guarded transaction.
+        try:
+            content_en = self.replier.generate(email_row, conversation)
+            draft = self.replier.build_reply(
+                email_row,
+                conversation,
+                content_en,
+                reply_type="review",
+                status="pending_review",
+            )
+            log_action(
+                self.db,
+                "high_review_draft",
+                "reply",
+                draft.id,
+                actor_id=None,
+                commit=False,
+            )
+            self.db.commit()
+        except Exception as exc:  # noqa: BLE001 - a failed draft must not lose
+            # the already-committed ticket; the boss can still write the reply
+            # manually from the ticket.
+            self.db.rollback()
+            logger.warning(
+                "High-risk review draft generation failed for %s: %s",
+                parsed.message_id,
+                exc,
+            )
+
         sent = reply.status == "sent"
         return ProcessingResult(
             message_id=parsed.message_id,

@@ -104,10 +104,15 @@ def test_chargeback_gets_reassurance_and_ticket(db, settings, fake_smtp_class, f
     conversation = db.get(Conversation, email.conversation_id)
     assert conversation.risk_level == "high"
 
-    reply = db.execute(select(Reply)).scalar_one()
-    assert reply.reply_type == "reassurance"
-    assert reply.status == "sent"
-    assert "24 hours" in reply.content_en
+    replies = db.execute(select(Reply)).scalars().all()
+    by_type = {r.reply_type: r for r in replies}
+    assert set(by_type) == {"reassurance", "review"}
+    reassurance = by_type["reassurance"]
+    assert reassurance.status == "sent"
+    assert "24 hours" in reassurance.content_en
+    # High-risk mail also gets a reviewable formal-reply draft, never sent.
+    assert by_type["review"].status == "pending_review"
+    assert by_type["review"].content_en and by_type["review"].content_cn
     assert (
         db.execute(
             select(Reply).where(Reply.reply_type == "acknowledgment")
@@ -139,10 +144,13 @@ def test_high_risk_smtp_failure_keeps_email_unseen_but_creates_ticket(
     summary = _service(db, settings, imap, FakeSMTP).fetch_and_process()
 
     assert summary["failed"] == 1
-    reply = db.execute(select(Reply)).scalar_one()
-    assert reply.reply_type == "reassurance"
-    assert reply.status == "failed"
-    assert reply.send_error
+    replies = db.execute(select(Reply)).scalars().all()
+    by_type = {r.reply_type: r for r in replies}
+    assert by_type["reassurance"].status == "failed"
+    assert by_type["reassurance"].send_error
+    # The formal-reply review draft is still generated (it never goes out via
+    # SMTP), so a failed reassurance does not block the boss's suggestion.
+    assert by_type["review"].status == "pending_review"
     # Ticket creation is never blocked by the failed send.
     ticket = db.execute(select(Ticket)).scalar_one()
     assert ticket.status == "pending"
@@ -293,11 +301,16 @@ def test_low_invoice_is_never_auto_sent(
     )
     summary = service.fetch_and_process()
 
-    assert summary["manual"] == 1
+    # invoice mail is never auto-sent; it now gets a review draft (not pure
+    # manual) so the boss edits/sends an AI draft instead of writing from
+    # scratch. Only the acknowledgment actually goes out.
+    assert summary["manual"] == 0
+    assert summary["review"] == 1
     general = db.execute(
         select(Reply).where(Reply.reply_type == "general")
     ).scalars().all()
-    assert general == []
+    assert len(general) == 1
+    assert general[0].status == "pending_review"
     ack = db.execute(
         select(Reply).where(Reply.reply_type == "acknowledgment")
     ).scalars().one()
@@ -337,6 +350,44 @@ def test_low_other_is_never_auto_sent(
     ).scalars().one()
     assert ack.status == "sent"
     assert len(FakeSMTP.instances[0].sent) == 1
+
+
+def test_medium_logistics_gets_review_draft(
+    db, settings, fake_smtp_class, fake_imap
+) -> None:
+    """Medium logistics mail is never auto-sent; it now yields a review draft
+    (not pure manual) so the boss edits/sends an AI draft from the workbench."""
+
+    raw = make_raw_email(
+        subject="Where is my order",
+        body="Can you tell me where my package is?",
+        message_id="<e2e-logistics@example.com>",
+    )
+    imap = fake_imap([("30", raw)])
+    service = IngestService(
+        db,
+        settings,
+        llm_client=ScriptedLLM(
+            settings,
+            '{"risk_level":"medium","confidence":0.9,"category":"logistics_inquiry",'
+            '"chargeback_risk":false,"summary_cn":"物流查询"}',
+        ),
+        mailer=MailerService(db, settings, smtp_class=FakeSMTP),
+        imap=imap,
+    )
+    summary = service.fetch_and_process()
+
+    assert summary["manual"] == 0
+    assert summary["review"] == 1
+    draft = db.execute(
+        select(Reply).where(Reply.status == "pending_review")
+    ).scalars().one()
+    assert draft.content_en and draft.content_cn  # English-to-send + CN display
+    assert draft.low_confidence is False
+    ack = db.execute(
+        select(Reply).where(Reply.reply_type == "acknowledgment")
+    ).scalars().one()
+    assert ack.status == "sent"
 
 
 def test_low_product_spec_low_confidence_reviews(

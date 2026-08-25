@@ -145,14 +145,14 @@ npm run dev            # http://localhost:5173，/api 自动代理到 8000
 ```bash
 cd backend
 LLM_PROVIDER=mock python -m app.cli simulate --risk low --dry-run      # 低风险 → 自动回复
-LLM_PROVIDER=mock python -m app.cli simulate --risk medium --dry-run   # 发票/物流/改单 → 转人工
+LLM_PROVIDER=mock python -m app.cli simulate --risk medium --dry-run   # 发票/物流/改单 → 待审核草稿
 LLM_PROVIDER=mock python -m app.cli simulate --risk high --dry-run     # 拒付 → 安抚信 + 自动建工单
 LLM_PROVIDER=mock python -m app.cli simulate --reason size --dry-run       # 尺码不符 → 换货挽留自动发
 LLM_PROVIDER=mock python -m app.cli simulate --reason not_wanted --dry-run # 犹豫 → 补偿草稿进待审核
 LLM_PROVIDER=mock python -m app.cli simulate --reason quality --dry-run    # 质量问题 → 不挽留，照单退换
 ```
 
-然后登录后台（`http://localhost:5173`）查看收件箱、会话时间轴、工单、知识库、标准问答、设置与审计日志。
+然后登录后台（`http://localhost:5173`）查看收件箱、**待审核工作台**、会话时间轴、工单、知识库、标准问答、设置与审计日志。
 
 ### 4.2 真实邮箱完整链路（DeepSeek + Titan）
 
@@ -172,12 +172,12 @@ LLM_PROVIDER=mock python -m app.cli simulate --reason quality --dry-run    # 质
 ### 4.3 中风险审核流 / 挽留闭环 / 紧急暂停 / 高风险+工单 / 知识库与 QA
 
 与 Phase 2/3 一致，详见各阶段说明：
-- 自动回复边界（保守收紧）：仅 `product_spec`（规格）/`usage`（用法）/`gratitude`（感谢）且置信度 ≥ `AUTO_SEND_MIN_CONFIDENCE`（0.8）才自动回复；发票/物流/改单/退款一律转人工；中风险 `other` 进「待审核」；差评/法律/媒体/平台投诉/拒付强制转高风险。
+- 自动回复边界（保守收紧）：仅 `product_spec`（规格）/`usage`（用法）/`gratitude`（感谢）且置信度 ≥ `AUTO_SEND_MIN_CONFIDENCE`（0.8）才自动回复；发票/物流/改单/退款生成**待审核草稿**（AI 拟稿，老板审核/修改后发送）；中风险 `other` 进「待审核」；差评/法律/媒体/平台投诉/拒付强制转高风险（安抚信 + 工单自动预生成建议回复草稿）。
 - 固定回执：需转人工 / 待审核 / 补偿挽留的邮件，系统先发一封固定英文回执（说明 1-2 个工作日内回复，不走 AI），同一会话只发一次，并建一张 medium 工单（SLA 按 2 个工作日计算）。
 - 退换货挽留：尺码→换货自动发；犹豫/买错→补偿草稿待审核；质量/损坏→照单退换；轮次超限→放行退货。
-- 待审核边界：只有「补偿挽留」草稿超过 24h 会告警并按客户原退货请求自动放行；其他普通待审核/转人工草稿不会自动发送。
+- 待审核边界：普通待审核草稿超过 24h 会**告警提醒老板**（不自动发送）；只有「补偿挽留」草稿超过 24h 会告警并按客户原退货请求自动放行。
 - 紧急暂停：后台「设置」页一键暂停/恢复（或 `python -m app.cli pause/resume`）。
-- 高风险：安抚信（承诺 24h 专人回复、不承诺赔偿）+ 自动建单（SLA=收件+24h，24×7）；同会话追问合并进原工单，不重复发安抚信。
+- 高风险：安抚信（承诺 24h 专人回复、不承诺赔偿）+ 自动建单（SLA=收件+24h，24×7）+ 工单内**预生成建议回复草稿**；同会话追问合并进原工单，不重复发安抚信。
 - 知识库：上传 PDF/DOCX/MD（≤20MB）全文注入；标准 QA：命中直出标准答案。
 - 收件箱「未读」页签显示未读会话角标；同一会话有多封未读时页签按会话数统计，会话详情内会显示具体未读封数。
 

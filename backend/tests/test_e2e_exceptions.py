@@ -401,8 +401,9 @@ def test_exception_08_followup_merges_into_original_ticket(
     assert summary["reassured"] == 1
     assert summary["followup"] == 1
     replies = db.execute(select(Reply)).scalars().all()
-    assert len(replies) == 1  # no duplicate reassurance
-    assert replies[0].reply_type == "reassurance"
+    # reassurance + high-risk review draft on the first mail; the follow-up
+    # merges into the existing ticket and adds nothing more.
+    assert {r.reply_type for r in replies} == {"reassurance", "review"}
     tickets = db.execute(select(Ticket)).scalars().all()
     assert len(tickets) == 1  # no duplicate ticket
     assert "high_risk_followup" in _audit_actions(db)
@@ -453,9 +454,9 @@ def test_exception_10_threats_escalate_without_promises(
     imap = fake_imap([("1", raw)])
     summary = _service(db, settings, imap).fetch_and_process()
     assert summary["reassured"] == 1
-    reply = db.execute(select(Reply)).scalar_one()
-    assert reply.reply_type == "reassurance"
-    lowered = reply.content_en.lower()
+    replies = db.execute(select(Reply)).scalars().all()
+    reassurance = next(r for r in replies if r.reply_type == "reassurance")
+    lowered = reassurance.content_en.lower()
     assert "24 hours" in lowered
     assert "refund" not in lowered
     assert "compensation" not in lowered
@@ -605,8 +606,7 @@ def test_exception_19_chargeback_never_retention(
     summary = _service(db, settings, imap).fetch_and_process()
     assert summary["reassured"] == 1
     replies = db.execute(select(Reply)).scalars().all()
-    assert len(replies) == 1
-    assert replies[0].reply_type == "reassurance"
+    assert {r.reply_type for r in replies} == {"reassurance", "review"}
     assert db.execute(select(Ticket)).scalars().one().status == "pending"
 
 
@@ -794,3 +794,60 @@ def test_exception_22b_approve_rejected_when_newer_release_exists(
         assert resp.json()["detail"] == "SUPERSEDED"
     finally:
         close_client(client)
+
+
+def test_review_timeout_scan_alerts_but_never_auto_sends(
+    db, session_factory, settings, monkeypatch
+) -> None:
+    """A stale ordinary pending_review draft alerts the boss but is never
+    auto-sent (only retention-compensation drafts auto-release)."""
+
+    customer = Customer(email="c@example.com", display_name="C", created_at=utcnow())
+    db.add(customer)
+    db.flush()
+    conv = Conversation(
+        customer_id=customer.id,
+        subject_normalized="logistics",
+        window_end=utcnow() + timedelta(days=7),
+        last_activity_at=utcnow() - timedelta(days=2),
+        status="open",
+    )
+    db.add(conv)
+    db.flush()
+    email = Email(
+        conversation_id=conv.id,
+        message_id="<stale-1@example.com>",
+        subject="Where is my order",
+        from_email="c@example.com",
+        to_email="bot@example.com",
+        body_text="Where is my package?",
+        is_inbound=True,
+        received_at=utcnow() - timedelta(days=2),
+    )
+    db.add(email)
+    db.flush()
+    draft = Reply(
+        conversation_id=conv.id,
+        email_id=email.id,
+        message_id="<stale-draft@example.com>",
+        in_reply_to="<stale-1@example.com>",
+        content_en="Let me check your order status.",
+        status="pending_review",
+        reply_type="general",
+        created_at=utcnow() - timedelta(hours=25),
+    )
+    db.add(draft)
+    db.commit()
+
+    alerts = _capture_alerts(monkeypatch)
+    service = SchedulerService(
+        settings, session_factory=session_factory, smtp_class=FakeSMTP
+    )
+    service._job_review_timeout_scan()
+    service._job_review_timeout_scan()  # process-local dedupe: alert once
+
+    assert any("待审核草稿超时" in title for title, _ in alerts)
+    assert len(alerts) == 1
+    assert "review_overdue_alert" in _audit_actions(db)
+    # Never auto-sent: the draft stays pending_review after the scan.
+    assert db.get(Reply, draft.id).status == "pending_review"

@@ -4,6 +4,16 @@
 > 范围：TECH.md 第九章 Phase 4（M-18 告警 + M-17 审计增强 + M-12 APScheduler + M-20 密钥加密 + F-09 设置页 + E2E 异常场景 1-22 + Docker/Nginx 部署）
 > Phase 3 遗留的 4 个待确认问题（知识库文档规模 / QA 命中判定 / QA 上限 100 条 / 未确认标注文案）不阻塞本阶段，继续列入文末待确认清单。
 
+## 收尾调整（2026-08-25：统一待审核草稿 + 待审核工作台）
+
+- **所有「其它风险」统一为可审草稿**：中风险物流 `logistics_inquiry` / 改单 `order_modification` / 发票 `invoice` 从「纯人工（只发固定回执，老板从零写）」改为 `_draft_for_review`——AI 拟稿进 `pending_review`，老板审核/修改后发送；固定回执与 medium 工单照旧。低风险 auto_send（`product_spec` / `usage` / `gratitude`）不变，仍是 AI 直接发。
+- **高风险工单自动预生成建议回复草稿**：`_handle_high_risk` 在安抚信发出、工单创建后，用 replier 生成一份正式回复草稿（`reply_type=review`、`status=pending_review`、中英双写），老板在待审工作台/工单里审核、修改、发送，审计 `high_review_draft`；生成失败独立事务回滚、不影响已提交的工单。安抚信「立即发」与 24h SLA 工单语义不变。
+- **待审核工作台**：新增 `GET /api/v1/review-queue` 聚合所有 `pending_review` 草稿（中风险 + 高风险建议稿 + 低置信度），每行带会话风险等级（high 优先）/等待时长/来信摘要；前端新页面 `/review` 一页集中审核（通过/驳回/打开会话编辑），导航加「待审核」入口。
+- **普通待审草稿超时告警**：scheduler 新增 `review_timeout_scan` job（每 30 分钟），普通 `pending_review` 草稿 >24h 未审告警老板（审计 `review_overdue_alert`，进程内去重，**不自动发送**）；仅 `retention_compensation` 超时仍走自动放行（原 job）。
+- **中英文约束**：所有草稿 `content_cn`（后台中文显示、可切英文原文）+ `content_en`（发送必用英文）双写；老板只改中文，保存时后端自动重译英文（`PUT /replies/{id}`）。
+- **Shopify ERP 预留**：草稿生成统一走 `ReplierService.generate`，未来接 ERP 时在生成链路注入订单/物流上下文即可；当前无订单数据标「未确认信息，请人工核实」，不做「订单数据永远不存在」的硬编码。
+- **涉及文件**：`services/{ingest,scheduler}.py`、`api/inbox.py`、`frontend/src/pages/ReviewQueue.tsx`、`frontend/src/{App.tsx}`、`frontend/src/components/Layout.tsx`、`frontend/src/pages/AuditLogs.tsx`、`tests/{test_pipeline,test_admin_api,test_e2e_exceptions,test_aggregation}.py`。
+
 ## 收尾调整（2026-08-24）
 
 - 自动放行边界已明确：仅 `retention_compensation` 待审核草稿超过 24h 会告警并自动放行退货；普通 `pending_review` / 转人工草稿不会自动发送。前端待审卡片文案已区分。
@@ -15,7 +25,7 @@
 - **测试模式 + 发件人白名单**（SystemState 持久化）：`test_mode=true` 时只处理白名单 `test_whitelist` 内发件人，空白名单 = 全隔离。被挡掉的邮件**不落库、保持服务器 UNSEEN**，每轮轮询重复跳过，退出测试模式后按正常链路重跑（`ingest.py` `_is_gated`）。开关：`PUT /api/v1/system/test-mode`（`{enabled, whitelist}`）；`GET /api/v1/system/status` 返回当前 `test_mode` / `test_whitelist` / `ai_paused`。
 - **暂停（ai_paused）语义与测试模式不同**：暂停只禁止回复与发送，收件仍解析落库（`pending_after_pause=true`，收件箱可见），恢复后按到达顺序重路由（`_process_pending_after_pause`）；测试模式是「不落库」的隔离。生产验收期建议用「暂停 + 白名单」组合，既能看邮件又不自动回。
 - **固定回执（acknowledgment，`services/acknowledgment.py`）**：转人工 / 待审核 / 补偿挽留的邮件发送固定英文回执（不走 LLM），同一会话只发一次；同时创建 medium 工单，SLA = 收件时间 + 2 个工作日（`business_days_from`，跳过周末）。发送失败（`ack_failed`）不影响审核，仍保证工单建立；成功发送后真正的人工回复会 `resolve` 该工单。
-- **LLM 自动发送风险收紧**：`classifier.resolve_action` 收敛为——仅 `product_spec` / `usage` / `gratitude` 且置信度 ≥ `auto_send_min_confidence`（默认 0.8）可自动发送；medium 一律 review（物流 `logistics_inquiry` / 改单 `order_modification` / 发票 `invoice` / 退款 `refund_request` 仍 escalate）；high / unknown 一律 escalate（差评、法律、媒体、平台投诉、拒付等强制 high）。`AUTO_SEND_MIN_CONFIDENCE` / `LOW_CONFIDENCE_THRESHOLD` 走 .env。
+- **LLM 自动发送风险收紧**：`classifier.resolve_action` 收敛为——仅 `product_spec` / `usage` / `gratitude` 且置信度 ≥ `auto_send_min_confidence`（默认 0.8）可自动发送；medium 一律 review（物流 `logistics_inquiry` / 改单 `order_modification` / 发票 `invoice` / 退款 `refund_request` 的 escalate 落点已由纯人工改为 `_draft_for_review` 进待审核草稿，2026-08-25）；high / unknown 一律 escalate（差评、法律、媒体、平台投诉、拒付等强制 high）。`AUTO_SEND_MIN_CONFIDENCE` / `LOW_CONFIDENCE_THRESHOLD` 走 .env。
 - **翻译 prefill 并发 + 状态轮询**：`translation_prefill_batch_size`（默认 3）与 `translation_prefill_concurrency`（默认 3）；LLM 并发翻译、主线程串行落库（不锁 SQLite）。新增只读 `GET /api/v1/emails/{id}/translate/status`（`done` / `pending`），前端「全文」未缓存时先出英文、轮询到中文后自动替换。
 - **后台体验补齐**：新增工单页（`GET /api/v1/tickets`）、黑名单页（`/api/v1/blocked-senders` 增删查）、审计页；失败回复可在详情查看 `send_error`、编辑（`PUT /replies/{id}`）后重试发送（`POST /replies/{id}/send`）。
 - **时间展示优化**：收件箱固定 UTC+8、相对时间 + hover 完整时间、`↓ 来信 / ↑ 回信 / ✎ 草稿待审核` 标记；待审草稿 >12h 橙色、>24h 红色。
@@ -48,9 +58,9 @@
 | M-18 | 告警通道：`services/alerting.py`，SMTP 邮件（复用 MailerService.send_text，3 次重试、不计入对客限频）+ Bark Webhook（POST JSON，裸 key 自动补 `https://api.day.app/`）；任一通道未配置则静默跳过并写日志，发送失败只记日志不影响主链路；告警内容含 UTC 时间与错误摘要 | ✅ |
 | M-18 | LLM 连续失败升级：`llm/client.py::chat_with_retry` 失败路径接入进程内计数器（5 分钟内连续 ≥5 次 → Bark+邮件双通道，成功即清零） | ✅ |
 | M-18 | IMAP 拉取连续 3 个轮询周期失败 → 告警（`IngestService.fetch_and_process` 异常路径计数，成功清零）；PRD 异常场景 1 的「重试 3 次 + 邮件积压不丢 + 恢复后批量拉取」由既有 `_connect` 3 次重试 + UNSEEN 保留保证 | ✅ |
-| M-17 | 审计全动作覆盖：补 `duplicate_skipped`、`silenced_set`、`high_risk_followup`、调度侧 `auto_close` / `sla_overdue` / `retention_timeout_alert` / `retention_auto_released`；原有 classified/auto_sent/reassured/review/manual/silenced/paused/failed/retention_*/ticket_created/kb_*/qa_*/登录登出等已核对无缺 | ✅ |
+| M-17 | 审计全动作覆盖：补 `duplicate_skipped`、`silenced_set`、`high_risk_followup`、调度侧 `auto_close` / `sla_overdue` / `retention_timeout_alert` / `retention_auto_released` / `high_review_draft` / `review_overdue_alert`；原有 classified/auto_sent/reassured/review/manual/silenced/paused/failed/retention_*/ticket_created/kb_*/qa_*/登录登出等已核对无缺 | ✅ |
 | M-17 | `GET /api/v1/audit-logs`（require_owner，Query: action / actor_id / from / to / page / size，按 at 倒序）；前端审计日志页（筛选 + 分页，中文界面），挂到导航与设置页 | ✅ |
-| M-12 | `services/scheduler.py`：BackgroundScheduler 5 job —— ① 每 90s（POLL_INTERVAL_SECONDS）IngestService 拉邮件（内部仍同步串行）② 每小时会话自动关闭（last_activity_at < now-30d 且 status!=resolved → resolved + 审计 auto_close）③ 每 30 分钟 SLA 逾期工单告警（pending/in_progress 且 sla_deadline<now）④ 每 30 分钟补偿挽留待审核超时（>24h → 告警老板；仍无处理 → 生成 retention_release 并 SMTP 发送，同 retention.py release 路径）⑤ 每 30s 心跳 | ✅ |
+| M-12 | `services/scheduler.py`：BackgroundScheduler 7 job —— ① 每 90s（POLL_INTERVAL_SECONDS）IngestService 拉邮件（内部仍同步串行）② 每 90s 翻译 prefill（`translation_prefill_batch_size`/`concurrency`，并发翻译串行落库）③ 每小时会话自动关闭（last_activity_at < now-30d 且 status!=resolved → resolved + 审计 auto_close）④ 每 30 分钟 SLA 逾期工单告警（pending/in_progress 且 sla_deadline<now）⑤ 每 30 分钟补偿挽留待审核超时（>24h → 告警老板；仍无处理 → 生成 retention_release 并 SMTP 发送，同 retention.py release 路径）⑥ 每 30 分钟普通待审核草稿超时（>24h → 告警老板，仅告警不自动发送）⑦ 每 30s 心跳 | ✅ |
 | M-12 | FastAPI lifespan 启动/关闭调度器；`cli.py` 的 poll/run 保留为手动/调试入口，生产以 scheduler 为准 | ✅ |
 | M-12 | `GET /api/v1/healthz` 增强：`{db, scheduler, uptime_sec}`，DB 或 scheduler 心跳超 60s（N-4）时返回 503，供 Docker healthcheck | ✅ |
 | M-20 | `core/security.py`：Fernet 加解密 + `data/secrets.bin` 读写（0600 权限）；`config.py` 运行期 `get_settings()` 检测到 secrets.bin 存在则解密覆盖 SECRET_FIELDS（EMAIL_PASSWORD / DEEPSEEK_API_KEY / OPENAI_API_KEY / SECRET_KEY / AGENT_SERVICE_TOKEN），文件缺失/密钥为空/解密失败均回退 .env；`python -m app.cli encrypt-secrets [--file]` 不删除 .env 明文。2026-08-17 补：secrets 路径经 `DATA_DIR` 单一数据根派生，容器内为 `/app/data/secrets.bin`（卷内），本地为仓库根 `data/secrets.bin`，与 app.db 同目录 | ✅ |

@@ -45,11 +45,13 @@ HEARTBEAT_INTERVAL_SECONDS = 30
 HEARTBEAT_STALE_SECONDS = 60  # TECH N-4: heartbeat older than 60s => unhealthy
 SCAN_INTERVAL_MINUTES = 30
 RETENTION_TIMEOUT_HOURS = 24
+REVIEW_TIMEOUT_HOURS = 24
 
 # Process-local dedupe so the boss is not spammed every scan cycle. Restarting
 # the process clears these sets; an audit row is written on first alert.
 _alerted_sla_ticket_ids: set[int] = set()
 _alerted_retention_reply_ids: set[int] = set()
+_alerted_review_reply_ids: set[int] = set()
 
 _scheduler_service: "SchedulerService | None" = None
 
@@ -96,6 +98,11 @@ class SchedulerService:
             (
                 "retention_timeout_scan",
                 self._job_retention_timeout_scan,
+                {"minutes": SCAN_INTERVAL_MINUTES},
+            ),
+            (
+                "review_timeout_scan",
+                self._job_review_timeout_scan,
                 {"minutes": SCAN_INTERVAL_MINUTES},
             ),
             (
@@ -395,6 +402,49 @@ class SchedulerService:
                         reply.id,
                         exc,
                     )
+
+    # ---------- job 5b: ordinary review-draft timeout alert ----------
+
+    def _job_review_timeout_scan(self) -> None:
+        """Alert when an ordinary pending_review draft sits >24h unaudited.
+
+        Never auto-sends (only retention-compensation drafts auto-release); a
+        stale review draft is escalated to the boss as a reminder to act. The
+        retention compensation drafts are excluded — they have their own job
+        with the auto-release path.
+        """
+
+        cutoff = utcnow() - timedelta(hours=REVIEW_TIMEOUT_HOURS)
+        factory = self._factory()
+        with factory() as db:
+            state = db.get(SystemState, 1)
+            if state is not None and state.ai_paused:
+                return
+            stale = (
+                db.execute(
+                    select(Reply).where(
+                        Reply.status == "pending_review",
+                        Reply.reply_type != "retention_compensation",
+                        Reply.created_at < cutoff,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not stale:
+                return
+            alerting = AlertingService(self.settings)
+            for reply in stale:
+                if reply.id in _alerted_review_reply_ids:
+                    continue
+                alerting.send_alert(
+                    "待审核草稿超时",
+                    f"回复草稿 #{reply.id}（会话 #{reply.conversation_id}）已超过 "
+                    f"{REVIEW_TIMEOUT_HOURS}h 未审核，请尽快登录后台处理。",
+                )
+                log_action(db, "review_overdue_alert", "reply", reply.id, commit=False)
+                _alerted_review_reply_ids.add(reply.id)
+            db.commit()
 
 
 def set_scheduler_service(service: SchedulerService | None) -> None:
