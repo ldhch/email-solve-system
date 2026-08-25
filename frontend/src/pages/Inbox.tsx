@@ -15,6 +15,7 @@ interface InboxItem {
   from_email: string;
   customer_name: string | null;
   email_count: number;
+  followup_count: number;
   attachment_count: number;
   unread_count: number;
   risk_level: string | null;
@@ -43,10 +44,12 @@ interface ConversationData {
   open_tickets?: {
     id: number;
     status: string;
+    risk_level: string;
     sla_deadline: string | null;
     is_overdue: boolean;
   }[];
   resolved_ticket_count?: number;
+  followup_count: number;
   timeline: TimelineItem[];
 }
 
@@ -592,6 +595,14 @@ export default function Inbox() {
                           SLA 临期
                         </span>
                       )}
+                      {item.followup_count >= 2 && (
+                        <span
+                          className="px-1.5 py-0.5 rounded bg-[#FDF1DC] text-[#B45309] text-[11px] font-medium"
+                          title="客户在等待答复期间已多次追问"
+                        >
+                          追问 {item.followup_count}
+                        </span>
+                      )}
                       <ActivityTime item={item} />
                     </div>
                   </button>
@@ -777,48 +788,57 @@ export default function Inbox() {
                   </div>
                 </div>
               </div>
-              {/* Merged ticket bar: open high-risk tickets show their SLA /
-                  overdue state here; replying to the customer auto-resolves them. */}
-              {conv.open_tickets && conv.open_tickets.length > 0 && (
-                <div className="shrink-0 border-b border-line bg-accent-tint/60 px-6 py-2.5">
-                  {conv.open_tickets.map((t) => (
-                    <div
-                      key={t.id}
-                      className="flex flex-wrap items-center gap-2 text-[12.5px]"
-                    >
-                      <span className={t.is_overdue ? "text-risk-high" : "text-accent"}>
-                        ⚠
-                      </span>
-                      <span
-                        className={
-                          t.is_overdue
-                            ? "font-medium text-risk-high"
-                            : "font-medium text-ink"
-                        }
+              <div className="flex-1 overflow-y-auto">
+                {/* Merged ticket bar: open tickets show their SLA / overdue
+                    state here; replying to the customer auto-resolves them.
+                    The label follows the ticket's real risk level, and the bar
+                    scrolls away with the timeline instead of pinning the top. */}
+                {conv.open_tickets && conv.open_tickets.length > 0 && (
+                  <div className="shrink-0 border-b border-line bg-accent-tint/60 px-6 py-2.5">
+                    {conv.open_tickets.map((t) => (
+                      <div
+                        key={t.id}
+                        className="flex flex-wrap items-center gap-2 text-[12.5px]"
                       >
-                        高风险工单
-                      </span>
-                      {t.is_overdue ? (
-                        <span className="text-risk-high font-medium">
-                          SLA 已逾期 · 尽快回复客户
+                        <span className={t.is_overdue ? "text-risk-high" : "text-accent"}>
+                          ⚠
                         </span>
-                      ) : t.sla_deadline ? (
-                        <span className="text-sub">
-                          SLA 截止 {formatLocal(t.sla_deadline)}
+                        <span
+                          className={
+                            t.is_overdue
+                              ? "font-medium text-risk-high"
+                              : "font-medium text-ink"
+                          }
+                        >
+                          {t.risk_level === "high" ? "高风险工单" : "审核工单"}
                         </span>
-                      ) : null}
-                      <span className="ml-auto text-sub">回复客户后自动标记解决</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {(!conv.open_tickets || conv.open_tickets.length === 0) &&
-                (conv.resolved_ticket_count ?? 0) > 0 && (
-                  <div className="shrink-0 border-b border-line bg-[#F7F9FB] px-6 py-2 text-[12.5px] text-sub">
-                    ✓ 高风险工单已解决（{conv.resolved_ticket_count} 条）
+                        {t.is_overdue ? (
+                          <span className="text-risk-high font-medium">
+                            SLA 已逾期 · 尽快回复客户
+                          </span>
+                        ) : t.sla_deadline ? (
+                          <span className="text-sub">
+                            SLA 截止 {formatLocal(t.sla_deadline)}
+                          </span>
+                        ) : null}
+                        <span className="ml-auto text-sub">回复客户后自动标记解决</span>
+                      </div>
+                    ))}
+                    {conv.followup_count >= 2 && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[12.5px] font-medium text-risk-high">
+                        <span>⏳</span>
+                        <span>客户已追问 {conv.followup_count} 次 · 请优先处理</span>
+                      </div>
+                    )}
                   </div>
                 )}
-              <div className="flex-1 px-6 py-5 overflow-y-auto">
+                {(!conv.open_tickets || conv.open_tickets.length === 0) &&
+                  (conv.resolved_ticket_count ?? 0) > 0 && (
+                    <div className="shrink-0 border-b border-line bg-[#F7F9FB] px-6 py-2 text-[12.5px] text-sub">
+                      ✓ 工单已解决（{conv.resolved_ticket_count} 条）
+                    </div>
+                  )}
+                <div className="px-6 py-5">
                 <Timeline
                   items={conv.timeline}
                   showCn={showCn}
@@ -845,6 +865,7 @@ export default function Inbox() {
                     </div>
                   )}
                   <ReplyEditor conversationId={conv.id} onSent={refresh} />
+                </div>
                 </div>
               </div>
             </>

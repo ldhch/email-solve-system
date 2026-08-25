@@ -145,6 +145,8 @@ def test_inbox_list_and_detail(settings, session_factory) -> None:
         assert item["id"] == ids["conversation_id"]
         assert item["subject"] == "Order question 1"
         assert item["email_count"] == 2
+        # 2 inbound, no real reply yet -> 1 follow-up past the first mail
+        assert item["followup_count"] == 1
         assert item["unread_count"] == 2
         assert item["is_read"] is False
         assert item["risk_level"] == "medium"
@@ -171,6 +173,8 @@ def test_conversation_archive_flow(settings, session_factory) -> None:
         # detail exposes the archive flag
         detail = api(client, "GET", f"/api/v1/conversations/{ids['conversation_id']}")
         assert detail.json()["data"]["is_archived"] is False
+        # single email, no reply yet -> no follow-up
+        assert detail.json()["data"]["followup_count"] == 0
 
         # archive -> hidden from the plain inbox, visible under archived=true
         archived = api(
@@ -691,7 +695,9 @@ def test_approve_pending_review_sends(settings, session_factory, monkeypatch) ->
             reply = db.get(Reply, ids["reply_id"])
             assert reply.status == "sent"
             assert reply.review_user_id is not None
-            assert reply.source == "system"
+            # Boss-approved drafts are human-sent replies -> manual, so the
+            # timeline shows「人工回复」instead of「自动回复」.
+            assert reply.source == "manual"
     finally:
         close_client(client)
 

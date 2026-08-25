@@ -1,12 +1,16 @@
 """APScheduler background jobs (M-12, TECH 3.1 / N-4).
 
-Five jobs:
-1. fetch_mail            every POLL_INTERVAL_SECONDS (90s) - IngestService
-2. auto_close_sessions   hourly - close stale conversations
-3. sla_overdue_scan      every 30 min - alert on overdue high-risk tickets
-4. retention_timeout_scan every 30 min - alert + auto-release stale
+Jobs:
+1. fetch_mail             every POLL_INTERVAL_SECONDS (90s) - IngestService
+2. prefill_translations   every POLL_INTERVAL_SECONDS - backfill CN summaries
+3. auto_close_sessions    hourly - close stale conversations
+4. sla_overdue_scan       every 30 min - alert on overdue high-risk tickets
+5. retention_timeout_scan every 30 min - alert + auto-release stale
    compensation drafts
-5. heartbeat             every 30s - freshness source for /api/v1/healthz
+6. review_timeout_scan    every 30 min - alert on stale pending_review drafts
+7. followup_alert_scan    every 30 min - alert when a customer keeps following
+   up while waiting for a first reply
+8. heartbeat              every 30s - freshness source for /api/v1/healthz
 
 APScheduler here is a *timer*, not a task queue (red line): the mail job still
 processes emails synchronously, one at a time, inside ``fetch_and_process``.
@@ -33,6 +37,7 @@ from app.models.system_state import SystemState
 from app.models.ticket import Ticket
 from app.services.alerting import AlertingService
 from app.services.acknowledgment import resolve_review_tickets
+from app.services.conversation import followup_count
 from app.services.audit import log_action, utcnow
 from app.services.ingest import IngestService
 from app.services.mailer import MailerService
@@ -46,12 +51,16 @@ HEARTBEAT_STALE_SECONDS = 60  # TECH N-4: heartbeat older than 60s => unhealthy
 SCAN_INTERVAL_MINUTES = 30
 RETENTION_TIMEOUT_HOURS = 24
 REVIEW_TIMEOUT_HOURS = 24
+# A conversation whose customer has followed up this many times since the first
+# mail, without the boss ever replying, triggers the「客户追问中」alert.
+FOLLOWUP_ALERT_THRESHOLD = 2
 
 # Process-local dedupe so the boss is not spammed every scan cycle. Restarting
 # the process clears these sets; an audit row is written on first alert.
 _alerted_sla_ticket_ids: set[int] = set()
 _alerted_retention_reply_ids: set[int] = set()
 _alerted_review_reply_ids: set[int] = set()
+_alerted_followup_conversation_ids: set[int] = set()
 
 _scheduler_service: "SchedulerService | None" = None
 
@@ -103,6 +112,11 @@ class SchedulerService:
             (
                 "review_timeout_scan",
                 self._job_review_timeout_scan,
+                {"minutes": SCAN_INTERVAL_MINUTES},
+            ),
+            (
+                "followup_alert_scan",
+                self._job_followup_alert_scan,
                 {"minutes": SCAN_INTERVAL_MINUTES},
             ),
             (
@@ -257,6 +271,11 @@ class SchedulerService:
         cutoff = utcnow() - timedelta(days=self.settings.session_auto_close_days)
         factory = self._factory()
         with factory() as db:
+            # Emergency pause: the boss wants the system fully inert, so stale
+            # conversations must not be auto-resolved behind their back.
+            state = db.get(SystemState, 1)
+            if state is not None and state.ai_paused:
+                return
             stale = db.execute(
                 select(Conversation).where(
                     Conversation.last_activity_at < cutoff,
@@ -444,6 +463,50 @@ class SchedulerService:
                 )
                 log_action(db, "review_overdue_alert", "reply", reply.id, commit=False)
                 _alerted_review_reply_ids.add(reply.id)
+            db.commit()
+
+    # ---------- job 5c: customer-follow-up alert ----------
+
+    def _job_followup_alert_scan(self) -> None:
+        """Alert when a customer keeps following up while waiting for a reply.
+
+        An open medium-risk review ticket stands for "the boss still has not
+        answered this conversation". If the customer has sent >=
+        FOLLOWUP_ALERT_THRESHOLD follow-ups past the first mail (see
+        followup_count), the conversation is at risk of going sour — nudge the
+        boss once (per conversation, per process) so it is not silently buried
+        in the inbox. Alerts the conversation id, not the ticket id, since a
+        conversation can carry several tickets.
+        """
+
+        factory = self._factory()
+        with factory() as db:
+            state = db.get(SystemState, 1)
+            if state is not None and state.ai_paused:
+                return
+            conv_ids = set(
+                db.execute(
+                    select(Ticket.conversation_id).where(
+                        Ticket.status.in_(("pending", "in_progress")),
+                        Ticket.risk_level == "medium",
+                    )
+                ).scalars().all()
+            )
+            if not conv_ids:
+                return
+            alerting = AlertingService(self.settings)
+            for cid in conv_ids:
+                if cid in _alerted_followup_conversation_ids:
+                    continue
+                if followup_count(db, cid) < FOLLOWUP_ALERT_THRESHOLD:
+                    continue
+                alerting.send_alert(
+                    "客户追问中",
+                    f"会话 #{cid} 的客户在等待答复期间已连续追问超过 "
+                    f"{FOLLOWUP_ALERT_THRESHOLD} 次，请尽快优先处理。",
+                )
+                log_action(db, "followup_alert", "conversation", cid, commit=False)
+                _alerted_followup_conversation_ids.add(cid)
             db.commit()
 
 

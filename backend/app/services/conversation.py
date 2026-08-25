@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -22,6 +22,8 @@ from app.core.logging import get_logger
 from app.models.conversation import Conversation
 from app.models.customer import Customer
 from app.models.email import Email
+from app.models.reply import Reply
+from app.services.acknowledgment import ACK_REPLY_TYPE
 from app.services.audit import utcnow
 
 logger = get_logger(__name__)
@@ -30,6 +32,39 @@ _PREFIX_RE = re.compile(r"^\s*(re|fwd?|fw|aw|sv|antw|antwort|vs|res|tr)\s*(\[\d+
 _PUNCT_RE = re.compile(r"[^\w\s]")
 
 RISK_RANK = {"high": 3, "medium": 2, "low": 1, "unknown": 0, None: 0}
+
+
+def followup_count(db: Session, conversation_id: int) -> int:
+    """Count customer follow-up emails after the last real sent reply.
+
+    A "real" reply is any sent reply that is not the acknowledgment receipt.
+    When the boss has never sent a real reply, every inbound after the first
+    mail counts as a follow-up (the first mail triggered the ack). Derived on
+    demand — never stored — so there is no counter to keep in sync.
+    """
+
+    last_real_sent_at = db.execute(
+        select(Reply.sent_at)
+        .where(
+            Reply.conversation_id == conversation_id,
+            Reply.status == "sent",
+            Reply.reply_type != ACK_REPLY_TYPE,
+        )
+        .order_by(Reply.sent_at.desc())
+        .limit(1)
+    ).scalar()
+
+    inbound = select(func.count(Email.id)).where(
+        Email.conversation_id == conversation_id,
+        Email.is_inbound.is_(True),
+    )
+    if last_real_sent_at is not None:
+        return db.execute(
+            inbound.where(Email.received_at > last_real_sent_at)
+        ).scalar() or 0
+    # No real reply yet: the first inbound triggered the ack; everything after
+    # it is a follow-up while the customer is still waiting.
+    return max(0, (db.execute(inbound).scalar() or 0) - 1)
 
 
 def normalize_subject(subject: str | None) -> str:

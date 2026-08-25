@@ -17,16 +17,23 @@ from sqlalchemy.orm import Session
 from app.api.auth import require_owner
 from app.api.common import get_settings_dependency, ok
 from app.config import Settings
+from app.core.exceptions import LLMError
 from app.db.session import get_db
+from app.llm.client import build_llm_client
 from app.models.user import User
 from app.models.system_state import SystemState
 from app.schemas.system import (
+    AckTemplateRequest,
+    AckTemplateResponse,
+    AckTemplateTranslateRequest,
     HealthzResponse,
     PauseRequest,
     SystemStatusResponse,
     TestModeRequest,
 )
+from app.services.acknowledgment import ACK_CONTENT_CN, ACK_CONTENT_EN
 from app.services.audit import log_action, utcnow
+from app.services.translator import TranslatorService
 from app.services import scheduler as scheduler_module
 
 router = APIRouter(prefix="/api/v1", tags=["system"])
@@ -213,3 +220,99 @@ async def system_resume(
         paused_reason=None,
         uptime_sec=int(time.time() - _STARTED_AT),
     ).model_dump())
+
+
+@router.get("/system/ack-template")
+async def system_ack_template_get(
+    _user=Depends(require_owner),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return the effective acknowledgment template (DB value or default).
+
+    CN is what the boss edits/reads in the admin UI; EN is what actually goes
+    out to the customer. ``updated_at`` is None until the boss saves a custom
+    template.
+    """
+
+    state = db.get(SystemState, 1)
+    content_cn = (state.ack_content_cn if state else None) or ACK_CONTENT_CN
+    content_en = (state.ack_content_en if state else None) or ACK_CONTENT_EN
+    # No custom template yet -> English is auto-managed (follows CN).
+    content_en_auto = state is None or state.ack_content_en_auto is not False
+    return ok(AckTemplateResponse(
+        content_cn=content_cn,
+        content_en=content_en,
+        content_en_auto=content_en_auto,
+        updated_at=_fmt(state.ack_updated_at if state else None),
+    ).model_dump())
+
+
+@router.put("/system/ack-template")
+async def system_ack_template_update(
+    payload: AckTemplateRequest,
+    request: Request,
+    user: User = Depends(require_owner),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dependency),
+) -> dict:
+    """Save the acknowledgment template (owner only).
+
+    When ``content_en`` is empty, translate ``content_cn`` to English once at
+    save time and cache it — the send path uses the fixed string, never the
+    LLM. Pure-English ``content_cn`` passes through unchanged.
+
+    ``content_en_auto`` is set True when we auto-translate (English follows CN)
+    and False when the boss supplied English by hand (kept verbatim, so a later
+    CN-only edit never silently overwrites a hand-tuned English).
+    """
+
+    content_cn = payload.content_cn.strip()
+    content_en = (payload.content_en or "").strip()
+    auto_translated = not content_en
+    if auto_translated:
+        llm = build_llm_client(settings)
+        try:
+            content_en = TranslatorService(llm).translate_to_english(content_cn)
+        except LLMError:
+            raise HTTPException(status_code=422, detail="LLM_FAILED") from None
+
+    state = db.get(SystemState, 1)
+    if state is None:
+        raise HTTPException(status_code=500, detail="INTERNAL")
+    state.ack_content_cn = content_cn
+    state.ack_content_en = content_en
+    state.ack_content_en_auto = auto_translated
+    state.ack_updated_at = utcnow()
+    log_action(
+        db,
+        "ack_template_updated",
+        "system",
+        state.id,
+        actor_id=user.id,
+        ip=request.client.host if request.client else None,
+    )
+    db.commit()
+    return ok(AckTemplateResponse(
+        content_cn=content_cn,
+        content_en=content_en,
+        content_en_auto=auto_translated,
+        updated_at=_fmt(state.ack_updated_at),
+    ).model_dump())
+
+
+@router.post("/system/ack-template/translate")
+async def system_ack_template_translate(
+    payload: AckTemplateTranslateRequest,
+    _user=Depends(require_owner),
+    settings: Settings = Depends(get_settings_dependency),
+) -> dict:
+    """Preview-only ZH->EN translation for the Settings page (never saved)."""
+
+    llm = build_llm_client(settings)
+    try:
+        content_en = TranslatorService(llm).translate_to_english(
+            payload.content_cn.strip()
+        )
+    except LLMError:
+        raise HTTPException(status_code=422, detail="LLM_FAILED") from None
+    return ok({"content_en": content_en})

@@ -22,6 +22,7 @@ export interface TimelineItem {
   send_error?: string | null;
   filename?: string;
   at?: string | null;
+  pending_after_pause?: boolean;
 }
 
 // A message's visual tone, so customer emails and our replies are clearly
@@ -951,7 +952,14 @@ export function Timeline({
         it.type === "reply" && it.status === "sent" && it.reply_id != null,
     )
     .sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
-  const latestSent = sentReplies[sentReplies.length - 1] ?? null;
+  // A reply only counts as「已回复」when it is not older than the latest
+  // customer email: an old reply pinned under a newer unanswered email reads
+  // as "this was answered" when it wasn't. Older replies stay reachable in the
+  // full thread / history fold.
+  const replied = sentReplies.filter(
+    (r) => (r.at ?? "") >= (latest?.at ?? ""),
+  );
+  const latestSent = replied[replied.length - 1] ?? null;
 
   if (mode === "summary") {
     return (
@@ -970,6 +978,11 @@ export function Timeline({
               {latest.summary_cn || freshPreview(latest.content)}
             </div>
             <AttachmentGrid items={attachments} />
+            {latest.pending_after_pause && (
+              <p className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-[#FFFBEB] px-2.5 py-1.5 text-[12px] font-medium text-[#B45309]">
+                ⏸ 系统暂停中 · 已排队待处理
+              </p>
+            )}
           </div>
         </li>
         {latestSent && (
@@ -1055,6 +1068,11 @@ export function Timeline({
         )}
         {isLatest && translateError && (
           <p className="mt-1 text-[12px] text-risk-high">{translateError}</p>
+        )}
+        {isLatest && item.pending_after_pause && (
+          <p className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-[#FFFBEB] px-2.5 py-1.5 text-[12px] font-medium text-[#B45309]">
+            ⏸ 系统暂停中 · 已排队待处理
+          </p>
         )}
       </div>
     </li>

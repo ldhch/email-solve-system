@@ -127,6 +127,42 @@ def test_auto_close_sessions_job(db, session_factory, settings) -> None:
     assert "auto_close" in actions
 
 
+def test_auto_close_sessions_skipped_while_paused(
+    db, session_factory, settings
+) -> None:
+    """Emergency pause makes the job inert: stale conversations are not
+    auto-resolved while paused, and the gate releases again on resume."""
+
+    customer = Customer(
+        email="c@example.com", display_name="C", created_at=utcnow()
+    )
+    db.add(customer)
+    db.flush()
+    stale = _conversation(db, customer.id, utcnow() - timedelta(days=40))
+    db.commit()
+
+    state = db.get(SystemState, 1)
+    if state is None:
+        state = SystemState(id=1, ai_paused=True)
+        db.add(state)
+    else:
+        state.ai_paused = True
+    db.commit()
+
+    service = SchedulerService(settings, session_factory=session_factory)
+    service._job_auto_close_sessions()
+
+    db.expire_all()
+    assert db.get(Conversation, stale.id).status == "open"  # untouched while paused
+
+    db.get(SystemState, 1).ai_paused = False
+    db.commit()
+    service._job_auto_close_sessions()
+
+    db.expire_all()
+    assert db.get(Conversation, stale.id).status == "resolved"  # gate released
+
+
 def test_sla_overdue_scan_alerts_once_and_audits(
     db, session_factory, settings, monkeypatch
 ) -> None:
@@ -659,3 +695,87 @@ def test_prefill_test_mode_empty_whitelist_translates_nothing(
 
     db.expire_all()
     assert db.get(Email, email.id).content_cn is None
+
+
+def _conversation_with_followups(db, n_emails: int) -> Conversation:
+    """Seed a conversation with n inbound emails and an open medium ticket."""
+    customer = Customer(email="f@example.com", display_name="F", created_at=utcnow())
+    db.add(customer)
+    db.flush()
+    conv = _conversation(db, customer.id, utcnow())
+    for i in range(n_emails):
+        db.add(
+            Email(
+                conversation_id=conv.id,
+                message_id=f"<f-{i}@example.com>",
+                subject="Follow up",
+                from_email="f@example.com",
+                to_email="bot@example.com",
+                body_text=f"Mail {i}",
+                is_inbound=True,
+                received_at=utcnow(),
+            )
+        )
+    db.add(
+        Ticket(
+            conversation_id=conv.id,
+            summary_cn="审核工单",
+            risk_level="medium",
+            status="pending",
+            sla_deadline=utcnow(),
+            created_at=utcnow(),
+        )
+    )
+    db.commit()
+    return conv
+
+
+def test_followup_alert_scan_alerts_once_and_audits(
+    db, session_factory, settings, monkeypatch
+) -> None:
+    """Customer followed up twice without a reply -> alert once, not every scan."""
+    conv = _conversation_with_followups(db, 3)
+    alerts = _capture_alerts(monkeypatch)
+    service = SchedulerService(settings, session_factory=session_factory)
+    service._job_followup_alert_scan()
+    service._job_followup_alert_scan()
+
+    assert len(alerts) == 1
+    assert "客户追问中" in alerts[0][0]
+    assert str(conv.id) in alerts[0][1]
+    audit_actions = [
+        a.action
+        for a in db.execute(
+            select(AuditLog).where(AuditLog.resource_id == conv.id)
+        ).scalars().all()
+    ]
+    assert audit_actions.count("followup_alert") == 1
+
+
+def test_followup_alert_scan_skips_few_followups(
+    db, session_factory, settings, monkeypatch
+) -> None:
+    """One follow-up is normal waiting, not yet an alert."""
+    _conversation_with_followups(db, 2)
+    alerts = _capture_alerts(monkeypatch)
+    SchedulerService(
+        settings, session_factory=session_factory
+    )._job_followup_alert_scan()
+    assert alerts == []
+
+
+def test_followup_alert_scan_skips_resolved_ticket(
+    db, session_factory, settings, monkeypatch
+) -> None:
+    """A resolved review ticket means the wait is over: no follow-up alert."""
+    conv = _conversation_with_followups(db, 3)
+    ticket = db.execute(
+        select(Ticket).where(Ticket.conversation_id == conv.id)
+    ).scalars().one()
+    ticket.status = "resolved"
+    db.commit()
+    alerts = _capture_alerts(monkeypatch)
+    SchedulerService(
+        settings, session_factory=session_factory
+    )._job_followup_alert_scan()
+    assert alerts == []

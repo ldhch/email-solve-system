@@ -27,6 +27,7 @@ from app.models.customer import Customer
 from app.models.email import Email
 from app.models.reply import Reply
 from app.models.ticket import Ticket
+from app.services.conversation import followup_count
 from app.services.ingest import mark_seen_on_server
 
 router = APIRouter(prefix="/api/v1", tags=["inbox"])
@@ -93,6 +94,10 @@ def _conversation_rows(
 
     latest_replies = _latest_reply_per_conversation(db)
     sla_deadlines = _latest_sla_deadline_per_conversation(db)
+    # Customer follow-ups while waiting for a first real reply, per
+    # conversation, so the inbox can badge「追问 N」on conversations that
+    # cannot be left sitting (conversation count is small; derived on demand).
+    followup_counts = {cid: followup_count(db, cid) for cid in conv_emails}
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     conversations = {
@@ -179,7 +184,16 @@ def _conversation_rows(
                 or latest_email.body_text
                 or latest_email.subject
             )
-            latest_status = reply.status if reply else None
+            # The newest activity is the customer's email, not our reply: a
+            # "sent"/"failed" status from an older reply would misread as
+            # "this email was answered", so those are suppressed. An older
+            # draft / pending-review reply is still the boss's to-do — keep it
+            # visible so it never silently drops off the「待审核」worklist.
+            latest_status = (
+                reply.status
+                if reply and reply.status in ("pending_review", "draft")
+                else None
+            )
             latest_at = email_ts
             latest_kind = "email"
 
@@ -216,6 +230,7 @@ def _conversation_rows(
                 "from_email": latest_email.from_email,
                 "customer_name": customer.display_name if customer else None,
                 "email_count": len(e_list),
+                "followup_count": followup_counts.get(cid, 0),
                 "has_attachments": any(e.has_attachments for e in e_list),
                 "attachment_count": sum(
                     image_count_by_email.get(e.id, 0) for e in e_list

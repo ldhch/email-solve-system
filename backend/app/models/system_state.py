@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, String
+from sqlalchemy import Boolean, CheckConstraint, DateTime, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -25,3 +25,12 @@ class SystemState(Base):
     # list of sender addresses (empty + test_mode on = isolate everything).
     test_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     test_whitelist: Mapped[str] = mapped_column(String(2048), nullable=False, default="")
+    # Acknowledgment reply template, editable from the Settings page (CN shown
+    # in the admin UI, EN is what goes to the customer). Nullable: null means
+    # "use the hardcoded defaults in services/acknowledgment.py".
+    ack_content_cn: Mapped[str | None] = mapped_column(Text)
+    ack_content_en: Mapped[str | None] = mapped_column(Text)
+    # True/None: English is auto-managed (re-translated from CN on save). False:
+    # the boss hand-tuned the English, so it is kept verbatim and never clobbered.
+    ack_content_en_auto: Mapped[bool | None] = mapped_column(Boolean)
+    ack_updated_at: Mapped[datetime | None] = mapped_column(DateTime)

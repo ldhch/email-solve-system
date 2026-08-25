@@ -19,6 +19,7 @@ interface ConversationData {
   risk_level: string | null;
   retention_attempts: number;
   sla_deadline: string | null;
+  followup_count: number;
   timeline: TimelineItem[];
 }
 
@@ -166,7 +167,14 @@ export default function ConversationDetail() {
             {waitingForCustomer ? (
               <>√ 已发送 · 等待客户回复，有新来信后继续</>
             ) : (
-              <>待回复 · 客户最新来信尚未处理</>
+              <>
+                待回复 · 客户最新来信尚未处理
+                {data.followup_count >= 2 && (
+                  <span className="ml-1 font-medium">
+                    · 客户已追问 {data.followup_count} 次
+                  </span>
+                )}
+              </>
             )}
           </div>
         )}

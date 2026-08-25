@@ -37,6 +37,9 @@ export function Layout({ children }: { children: ReactNode }) {
               <NavLink to="/templates" className={linkCls}>
                 快捷模板
               </NavLink>
+              <NavLink to="/ack-template" className={linkCls}>
+                自动回复模板
+              </NavLink>
               <NavLink to="/knowledge" className={linkCls}>
                 知识库
               </NavLink>

@@ -24,6 +24,7 @@ from app.schemas.admin import (
 )
 from app.services.audit import log_action, utcnow
 from app.services.acknowledgment import resolve_review_tickets
+from app.services.conversation import followup_count
 from app.services.mailer import MailerService
 from app.services.replier import ReplierService
 from app.services.translator import TranslatorService, contains_cjk
@@ -114,6 +115,7 @@ async def conversation_detail(
                 "summary_cn": e.summary_cn,
                 "content_cn": e.content_cn,
                 "at": _fmt(e.received_at),
+                "pending_after_pause": e.pending_after_pause,
             }
         )
     for r in replies:
@@ -177,6 +179,7 @@ async def conversation_detail(
                 {
                     "id": t.id,
                     "status": t.status,
+                    "risk_level": t.risk_level,
                     "sla_deadline": _fmt(t.sla_deadline),
                     "is_overdue": (
                         t.sla_deadline < now and t.status in ("pending", "in_progress")
@@ -185,6 +188,9 @@ async def conversation_detail(
                 for t in open_tickets
             ],
             "resolved_ticket_count": resolved_ticket_count,
+            # Customer follow-ups since the last real reply, so the detail view
+            # can flag conversations that cannot be left waiting (see inbox too).
+            "followup_count": followup_count(db, conv.id),
             "timeline": timeline,
         }
     )
@@ -403,6 +409,10 @@ async def approve_reply(
 
     reply.status = "sent"
     reply.sent_at = utcnow()
+    # A boss-approved draft is a reviewed, human-sent reply (not a system
+    # auto-reply): mark it manual so the timeline shows「人工回复」. System
+    # auto-sends (ack / low-risk auto-reply) keep source="system".
+    reply.source = "manual"
     reply.review_user_id = user.id
     reply.reviewed_at = utcnow()
     conv = db.get(Conversation, reply.conversation_id)

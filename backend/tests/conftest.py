@@ -82,6 +82,7 @@ def _reset_alert_failure_counters():
     alerting.reset_failure_counters()
     scheduler_module._alerted_sla_ticket_ids.clear()
     scheduler_module._alerted_retention_reply_ids.clear()
+    scheduler_module._alerted_followup_conversation_ids.clear()
     yield
 
 

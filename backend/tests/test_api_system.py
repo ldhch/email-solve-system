@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from app.core.exceptions import LLMError
 from app.models.audit import AuditLog
 from app.models.user import User
+from app.services.translator import TranslatorService
 
 from api_helpers import api, close_client, login, make_client, seed_owner
 
@@ -279,5 +281,130 @@ def test_test_mode_writes_audit_log(settings, session_factory) -> None:
         with session_factory() as db:
             actions = {a.action for a in db.query(AuditLog).all()}
         assert "test_mode_changed" in actions
+    finally:
+        close_client(client)
+
+
+# ---------- 自动确认回复模板 (acknowledgment template) ----------
+
+
+def test_ack_template_requires_login(settings, session_factory) -> None:
+    client = make_client(settings, session_factory)
+    try:
+        resp = api(client, "GET", "/api/v1/system/ack-template")
+        assert resp.status_code == 401
+    finally:
+        close_client(client)
+
+
+def test_get_ack_template_defaults(settings, session_factory) -> None:
+    seed_owner(session_factory, settings.owner_username, settings.owner_password)
+    client = make_client(settings, session_factory)
+    try:
+        login(client, settings.owner_username, settings.owner_password)
+        resp = api(client, "GET", "/api/v1/system/ack-template")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert "{customer_name}" in data["content_en"]
+        assert "{customer_name}" in data["content_cn"]
+        assert data["content_en_auto"] is True
+        assert data["updated_at"] is None
+    finally:
+        close_client(client)
+
+
+def test_put_ack_template_with_explicit_en(settings, session_factory) -> None:
+    seed_owner(session_factory, settings.owner_username, settings.owner_password)
+    client = make_client(settings, session_factory)
+    try:
+        login(client, settings.owner_username, settings.owner_password)
+        resp = api(
+            client,
+            "PUT",
+            "/api/v1/system/ack-template",
+            json={"content_cn": "感谢您联系。", "content_en": "Thanks for writing."},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["content_cn"] == "感谢您联系。"
+        assert data["content_en"] == "Thanks for writing."
+        assert data["content_en_auto"] is False
+        assert data["updated_at"] is not None
+
+        # Persisted: a fresh GET returns what we saved (manual EN stays manual).
+        got = api(client, "GET", "/api/v1/system/ack-template").json()["data"]
+        assert got["content_en"] == "Thanks for writing."
+        assert got["content_en_auto"] is False
+
+        with session_factory() as db:
+            owner = db.query(User).filter(User.username == settings.owner_username).first()
+            entries = db.query(AuditLog).filter(
+                AuditLog.action == "ack_template_updated"
+            ).all()
+        assert len(entries) == 1
+        assert entries[0].actor_id == owner.id
+    finally:
+        close_client(client)
+
+
+def test_put_ack_template_translates_when_en_empty(settings, session_factory) -> None:
+    seed_owner(session_factory, settings.owner_username, settings.owner_password)
+    client = make_client(settings, session_factory)
+    try:
+        login(client, settings.owner_username, settings.owner_password)
+        resp = api(
+            client,
+            "PUT",
+            "/api/v1/system/ack-template",
+            json={"content_cn": "感谢您联系 LBORA。"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["content_en"]  # auto-translated (Mock LLM -> non-empty)
+        assert data["content_en_auto"] is True
+    finally:
+        close_client(client)
+
+
+def test_put_ack_template_llm_failure_422(settings, session_factory, monkeypatch) -> None:
+    def _boom(self, text: str) -> str:
+        raise LLMError("translate down")
+
+    monkeypatch.setattr(TranslatorService, "translate_to_english", _boom)
+    seed_owner(session_factory, settings.owner_username, settings.owner_password)
+    client = make_client(settings, session_factory)
+    try:
+        login(client, settings.owner_username, settings.owner_password)
+        resp = api(
+            client,
+            "PUT",
+            "/api/v1/system/ack-template",
+            json={"content_cn": "感谢您联系。"},
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "LLM_FAILED"
+    finally:
+        close_client(client)
+
+
+def test_post_ack_template_translate_preview_not_saved(
+    settings, session_factory
+) -> None:
+    seed_owner(session_factory, settings.owner_username, settings.owner_password)
+    client = make_client(settings, session_factory)
+    try:
+        login(client, settings.owner_username, settings.owner_password)
+        resp = api(
+            client,
+            "POST",
+            "/api/v1/system/ack-template/translate",
+            json={"content_cn": "您好，我们正在处理。"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"]["content_en"]
+
+        # Preview must not persist: updated_at stays None.
+        got = api(client, "GET", "/api/v1/system/ack-template").json()["data"]
+        assert got["updated_at"] is None
     finally:
         close_client(client)

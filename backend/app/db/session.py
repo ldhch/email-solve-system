@@ -270,6 +270,27 @@ def _ensure_system_state_test_columns(engine: Engine) -> None:
             )
 
 
+def _ensure_system_state_ack_columns(engine: Engine) -> None:
+    """Add ``system_state.ack_content_cn/en/updated_at`` to existing DBs.
+
+    Null columns mean "use the hardcoded acknowledgment defaults", so no
+    backfill value is needed — the ALTER is a plain ADD COLUMN.
+    """
+
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(system_state)"))}
+        if "ack_content_cn" not in cols:
+            conn.execute(text("ALTER TABLE system_state ADD COLUMN ack_content_cn TEXT"))
+        if "ack_content_en" not in cols:
+            conn.execute(text("ALTER TABLE system_state ADD COLUMN ack_content_en TEXT"))
+        if "ack_content_en_auto" not in cols:
+            conn.execute(
+                text("ALTER TABLE system_state ADD COLUMN ack_content_en_auto BOOLEAN")
+            )
+        if "ack_updated_at" not in cols:
+            conn.execute(text("ALTER TABLE system_state ADD COLUMN ack_updated_at DATETIME"))
+
+
 def init_db(settings: Settings | None = None) -> None:
     """Create all tables (create_all) and seed defaults. No migrations."""
 
@@ -291,6 +312,7 @@ def init_db(settings: Settings | None = None) -> None:
     _drop_reply_is_deleted_column(engine)
     _drop_ticket_is_deleted_column(engine)
     _ensure_system_state_test_columns(engine)
+    _ensure_system_state_ack_columns(engine)
     seed(settings)
 
 

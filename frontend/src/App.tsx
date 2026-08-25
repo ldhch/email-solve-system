@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { RequireAuth } from "./components/AuthGuard";
+import AckTemplate from "./pages/AckTemplate";
 import AuditLogs from "./pages/AuditLogs";
 import BlockedSenders from "./pages/BlockedSenders";
 import ConversationDetail from "./pages/ConversationDetail";
@@ -20,6 +21,7 @@ export default function App() {
         <Route path="/tickets" element={<Tickets />} />
         <Route path="/blocked" element={<BlockedSenders />} />
         <Route path="/templates" element={<Templates />} />
+        <Route path="/ack-template" element={<AckTemplate />} />
         <Route path="/knowledge" element={<KnowledgeBase />} />
         <Route path="/qa" element={<QAPairs />} />
         <Route path="/settings" element={<Settings />} />
