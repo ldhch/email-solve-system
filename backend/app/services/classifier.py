@@ -92,6 +92,7 @@ AD_KEYWORDS = [
     "to unsubscribe",
     "unsubscribe at",
     "unsubscribe link",
+    "unsubscribe",
     "退订",
     "广告邮件",
 ]
@@ -138,7 +139,11 @@ Rules:
 - logistics/tracking/order changes/invoices: risk medium (no ERP data).
 - product specs, usage questions, policy/warranty info, thanks: risk low.
 - is_advertisement: true for marketing/newsletter/promotional or spam mail
-  (coupon codes, "you're receiving this email", unsubscribe links, sales promos).
+  (coupon codes, "you're receiving this email", unsubscribe links, sales promos),
+  and for third-party app notifications / stats / reports / product-update
+  broadcasts that carry no customer-service request (checkout stats, review
+  prompts, upsells). Order / tracking / payment transactional emails are NOT
+  advertisements even though they are automated.
 - If you cannot decide, use confidence < 0.5 and category "other".
 - Never invent facts. Do not output anything besides the JSON object.
 """

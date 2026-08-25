@@ -14,6 +14,7 @@ interface ConversationData {
   id: number;
   subject: string;
   customer: { email: string; display_name: string | null };
+  support_from?: string;
   status: string;
   risk_level: string | null;
   retention_attempts: number;
@@ -48,8 +49,21 @@ export default function ConversationDetail() {
 
   useEffect(() => {
     load();
-    const timer = setInterval(load, 5000); // F-02: 5s polling, no websocket
-    return () => clearInterval(timer);
+    // F-02: 5s polling, no websocket. Skip ticks while the tab is hidden — a
+    // background page doesn't need live data, and re-rendering a long thread
+    // (photos, quoted rounds) on every tick is what makes scrolling stutter.
+    // Refreshing once on return to the foreground keeps it current.
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, 5000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [load]);
 
   if (error && !data) {
@@ -131,6 +145,7 @@ export default function ConversationDetail() {
         showCn={showCn}
         mode={convMode}
         customerEmail={data.customer.email}
+        supportFrom={data.support_from}
       />
 
       <ReplyDraftEditor items={data.timeline} onChanged={load} />

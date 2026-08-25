@@ -77,6 +77,7 @@ async def conversation_detail(
     conversation_id: int,
     _user=Depends(require_owner),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings_dependency),
 ) -> dict:
     conv = db.get(Conversation, conversation_id)
     if conv is None:
@@ -160,6 +161,10 @@ async def conversation_detail(
                 "email": conv.customer.email,
                 "display_name": conv.customer.display_name,
             },
+            # Our own support address, so the frontend can tell the three
+            # sides apart inside quoted rounds: 客户 (customer address), 我方
+            # (this address) and 系统 (any other third party, e.g. Shopify).
+            "support_from": settings.email_username,
             "status": _conversation_status(conv),
             "risk_level": conv.risk_level,
             "is_ad": any(e.is_ad for e in emails if e is not None),

@@ -33,6 +33,7 @@ interface ConversationData {
   id: number;
   subject: string;
   customer: { email: string; display_name: string | null };
+  support_from?: string;
   status: string;
   risk_level: string | null;
   is_ad?: boolean;
@@ -823,6 +824,7 @@ export default function Inbox() {
                   showCn={showCn}
                   mode={convMode}
                   customerEmail={conv.customer.email}
+                  supportFrom={conv.support_from}
                 />
                 <PendingReviewCard items={conv.timeline} onRefresh={refresh} />
                 <ReplyDraftEditor items={conv.timeline} onChanged={refresh} />

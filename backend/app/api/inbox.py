@@ -8,10 +8,12 @@ so the owner scans one thread at a time instead of one email at a time.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -437,9 +439,16 @@ async def get_inbox_email(
     )
 
 
+# Thumbnail cache: tiny JPEGs (tens of KB) keyed by attachment id, so the
+# inbox thumbnail grid does not re-decode 3-4MB phone photos on every render
+# or 5s poll. Bounded so a long-lived process cannot grow it unboundedly.
+_thumb_cache: dict[int, bytes] = {}
+
+
 @router.get("/attachments/{attachment_id}")
 async def download_attachment(
     attachment_id: int,
+    thumb: bool = False,
     _user=Depends(require_owner),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings_dependency),
@@ -451,6 +460,31 @@ async def download_attachment(
     path = data_dir / attachment.stored_path
     if not path.is_file():
         raise HTTPException(status_code=404, detail="FILE_MISSING")
+
+    # Thumbnails: downscale the image to a ~256px square so the attachment grid
+    # downloads tens of KB instead of the full multi-megabyte original. Non-
+    # image files are served unchanged regardless of the flag.
+    if thumb and (attachment.content_type or "").startswith("image/"):
+        cached = _thumb_cache.get(attachment_id)
+        if cached is not None:
+            return Response(content=cached, media_type="image/jpeg")
+        try:
+            with Image.open(path) as im:
+                im.thumbnail((256, 256))
+                buf = BytesIO()
+                im.convert("RGB").save(buf, format="JPEG", quality=82)
+                data = buf.getvalue()
+        except Exception:
+            # Corrupt / un-decodable image: fall back to the original rather
+            # than failing the whole thumbnail grid.
+            return Response(
+                content=path.read_bytes(),
+                media_type=attachment.content_type,
+            )
+        if len(_thumb_cache) < 512:
+            _thumb_cache[attachment_id] = data
+        return Response(content=data, media_type="image/jpeg")
+
     # Plain bytes response: FileResponse streams via anyio's thread pool, which
     # is unavailable in some sandboxed environments (see Phase 1 notes). Files
     # are capped at 20MB, so in-memory reading is acceptable for this admin UI.

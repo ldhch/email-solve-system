@@ -106,10 +106,11 @@ function quoteDepth(line: string): number {
 }
 
 // Embedded HTML tags (<b>/<i>…), invisible markers mailers inject (U+035F
-// combining grapheme joiner, zero-width spaces) and base64/CSS debris (very
-// long tokens with no spaces) make full-text look broken. Sanitize at the
-// chunking entry so the English original, Chinese translation, fresh body and
-// quoted history all get cleaned; real paragraphs and URLs are preserved.
+// combining grapheme joiner, zero-width spaces), base64/CSS debris (very long
+// tokens with no spaces) and template noise (image placeholders, rule dashes,
+// asterisk emphasis) make full-text look broken. Sanitize at the chunking
+// entry so the English original, Chinese translation, fresh body and quoted
+// history all get cleaned; real paragraphs and URLs are preserved.
 function sanitizeText(text: string): string {
   return text
     .replace(/\r\n/g, "\n")
@@ -123,6 +124,18 @@ function sanitizeText(text: string): string {
       s = s.replace(/[\u034f\u00ad\u200b\u200c\u200d\u2060\ufeff]/g, "");
       const t = s.trim();
       if (!t) return "";
+      // Mail-template noise: plain-text parts drop image placeholders in for
+      // inline logos ("[image: Lbora]" / "[图片：…]") and asterisk emphasis
+      // marks ("*bold*"). A whole-line placeholder or rule (—, =, _, *) is
+      // dropped; inline placeholders are removed, emphasis stars are unwrapped.
+      // A bare "图片" / "image" line is a translated placeholder with no
+      // content and goes the same way.
+      if (/^\[(?:image|图片)[：:][ \t]*[^\]]*\]$/.test(t)) return "";
+      if (/^(?:图片|image)[：:]*$/i.test(t)) return "";
+      if (/^[*\-=_]{3,}$/.test(t)) return "";
+      s = s
+        .replace(/\[(?:image|图片)[：:][ \t]*[^\]]*\]/g, "")
+        .replace(/\*([^*\r\n]+)\*/g, "$1");
       // base64 / inline-CSS debris: very long, no spaces, not a URL.
       if (t.length > 200 && !/\s/.test(t) && !/^[a-z]+:\/\//i.test(t)) return "";
       return s;
@@ -140,10 +153,42 @@ function isRoundHead(line: string): boolean {
 
 function chunkEmailText(text: string): BodyChunk[] {
   const lines = sanitizeText(text).split("\n");
+  // Mail clients and the translator sometimes wrap a round header across two
+  // lines. Two shapes occur: "…, <sender>" + a bare "wrote:" line, and the
+  // long "<addr>" pair itself ("…support@shoplbora.com <" + "support@…> 写道：").
+  // Rejoin each so parseRoundHead sees a single header (address + verb).
+  const joined: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const cur = lines[i];
+    const next = lines[i + 1];
+    const curTrim = cur.trim();
+    // The continuation line may itself carry a ">" quote prefix ("… <" on one
+    // line, "> support@…> 写道：" on the next) — strip it so the re-joined
+    // header reads as one line and parseRoundHead sees "<addr>" intact.
+    const nextClean = next ? next.trim().replace(/^[>\s]+/, "") : "";
+    if (
+      next &&
+      /^wrote[:：]|写道[:：]$/.test(nextClean) &&
+      /<[^>]*@[^>]*>/.test(curTrim)
+    ) {
+      joined.push(`${curTrim} ${nextClean}`);
+      i++;
+    } else if (
+      next &&
+      curTrim.endsWith("<") &&
+      /写道[:：]|wrote[:：]/.test(nextClean) &&
+      /@/.test(nextClean)
+    ) {
+      joined.push(`${curTrim}${nextClean}`);
+      i++;
+    } else {
+      joined.push(cur);
+    }
+  }
   const chunks: BodyChunk[] = [];
   let inQuoted = false;
 
-  for (const raw of lines) {
+  for (const raw of joined) {
     const trimmed = raw.trim();
     const last = chunks[chunks.length - 1];
 
@@ -182,6 +227,20 @@ function chunkEmailText(text: string): BodyChunk[] {
 }
 
 // 正文里的 http(s) 链接还原成可点击的蓝色链接（纯文本翻译保留了 URL）。
+// 超长链接（Shopify 追踪链接带 ~1.6KB 签名 token、Google Maps 也啰嗦）会撑爆
+// 版面：超过显示阈值一律折叠成短标签，完整地址放 title 悬停可见、点击跳转不变。
+const MAX_URL_DISPLAY = 90;
+
+function shortUrl(url: string): string {
+  if (url.length <= MAX_URL_DISPLAY) return url;
+  // Shopify order-status tracking links ("…/_t/c/v3/<token>") are an opaque
+  // signed wall — collapse them to a concise 查看物流 entry point instead of
+  // a truncated address.
+  if (/^https?:\/\/[^/]+\/_t\/c\//i.test(url)) return "查看物流";
+  const domain = url.replace(/^https?:\/\//i, "").split("/")[0];
+  return `${domain}/…`;
+}
+
 function Linkify({ text }: { text: string }) {
   const nodes: ReactNode[] = [];
   const re = /(https?:\/\/[^\s　<>"'，。；：（）【】]+)/g;
@@ -197,9 +256,10 @@ function Linkify({ text }: { text: string }) {
         href={url}
         target="_blank"
         rel="noreferrer"
+        title={url}
         className="break-all text-accent underline decoration-accent/40 hover:text-accent/80"
       >
-        {url}
+        {shortUrl(url)}
       </a>,
     );
     last = re.lastIndex;
@@ -208,11 +268,12 @@ function Linkify({ text }: { text: string }) {
   return <>{nodes}</>;
 }
 
-// Quoted-history *stripping* lives in chunkEmailText / EmailBodyView (kept
-// untouched): a customer reply that quotes our Hostinger mail shows only its
-// fresh content. The full view no longer rebuilds message blocks from that
-// quoted copy — the「历史对话」fold draws from the authoritative DB timeline
-// instead, so a quoted reply never appears twice.
+// The full view draws the authoritative history from the DB timeline (the
+//「历史对话」fold) instead of rebuilding it from the freshest email's quoted
+// copy, so a quoted reply never appears twice. Each email still keeps its own
+// quoted history reachable behind the「显示引文」fold in EmailBodyView — for
+// single-email conversations that quote is the only record of the earlier
+// thread, so hiding it would lose the history entirely.
 
 // Summary mode shows the Chinese digest; if none was generated, fall back to
 // the freshest part of the body with quoted history stripped, so the boss
@@ -231,11 +292,291 @@ function freshPreview(content?: string | null): string {
 
 // ---- Shared pieces ----
 
+// "On Monday, August 24, 2026, 5:56 AM, support@shoplbora.com <…> wrote:" or
+// the Chinese "2026年8月3日（周一）上午9:52，Lbora <…> 写道：" — the round header
+// mail clients embed verbatim before each quoted round. The sender email
+// inside the angle brackets is what decides the round's side.
+function parseRoundHead(raw: string): { email: string; name: string; time: string } | null {
+  // Quoted lines may keep a stray leading space (or a ">" for classic quotes);
+  // round headers still read as "… <sender> wrote:" once trimmed. A header is
+  // recognized purely by its shape — an angle-bracketed address plus the
+  // wrote/写道 verb — so localised clients (中文邮箱的「写道：」) split too,
+  // instead of being gated on the English "On …" opener.
+  const line = raw.trim().replace(/^[>\s]+/, "");
+  if (!/wrote[:：]|写道[:：]/.test(line)) return null;
+  // The sender address is normally angle-bracketed ("… <support@…> wrote:"),
+  // but the Chinese translation occasionally collapses the header to a bare
+  // address ("…，support@… 写道："). Match the brackets first, then fall back
+  // to a bare-address scan so those rounds are still attributed to a side.
+  let email = "";
+  let emailStart = -1;
+  const angle = line.match(/<([^>]+@[^>]+)>/);
+  if (angle) {
+    email = angle[1].trim().toLowerCase();
+    emailStart = angle.index ?? -1;
+  } else {
+    const bare = line.match(
+      /[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/,
+    );
+    if (bare) {
+      email = bare[0].toLowerCase();
+      emailStart = bare.index ?? -1;
+    }
+  }
+  if (!email || !email.includes("@")) return null;
+  const before = line.slice(0, emailStart).trim();
+  // Name is the text after the last comma: half-width in English
+  // ("…, 5:56 AM, support@… wrote:") vs full-width in Chinese
+  // ("…上午9:52，Lbora <…> 写道：").
+  const comma = Math.max(before.lastIndexOf(","), before.lastIndexOf("，"));
+  const nameRaw = comma >= 0 ? before.slice(comma + 1).trim() : "";
+  // Some clients end the time part without a trailing comma ("…at 9:52 AM
+  // Lbora <…>"), which leaks the timestamp into the name — treat the whole
+  // "before" as the time then, and fall back to the address as the name.
+  const leak = /(\d{1,2}:\d{2}[ \t]*(?:am|pm)?)|\b\d{4}\b/i.test(nameRaw)
+    ? true
+    : false;
+  const name = leak || !nameRaw ? email : nameRaw;
+  const time = formatRoundTime(leak || !nameRaw ? before : before.slice(0, comma));
+  return { email, name, time };
+}
+
+// "On Monday, August 24, 2026, 5:56 AM" / "2026年8月24日（周一）凌晨12:22" — the
+// date-time part of a round header, stripped of the leading "On " so it reads
+// as a timestamp on the round's header row. A bare-address header leaves a
+// trailing separator ("…上午7:10，" before the address), which is dropped too.
+function formatRoundTime(raw: string): string {
+  return raw.replace(/^on\s+/i, "").replace(/[,，]\s*$/, "").trim();
+}
+
+// The three parties that can appear inside a quoted round: the customer, our
+// own support address, and any third party (Shopify order confirmations,
+// automations, …). Without a support_from the caller just falls back to the
+// old two-way split (customer vs our side).
+type Side = "customer" | "support" | "system";
+
+function sideOf(email: string, customer: string, support: string): Side {
+  if (email === customer) return "customer";
+  if (!support || email === support) return "support";
+  return "system";
+}
+
+const SIDE_BADGE: Record<Side, string> = {
+  customer: "bg-accent-tint text-accent",
+  support: "bg-[#EFF1F4] text-sub",
+  system: "bg-amber-100 text-amber-700",
+};
+
+const SIDE_LABEL: Record<Side, string> = {
+  customer: "客户",
+  support: "我方",
+  system: "系统",
+};
+
+// One quoted line inside a round. The mail-client ">" markers are dropped —
+// nesting depth is expressed by an increasing left indent instead (the round
+// container already supplies the rail and its base padding).
+function QuoteLine({ line }: { line: { text: string; depth: number } }) {
+  return (
+    <div
+      className="break-words whitespace-pre-wrap"
+      style={{ paddingLeft: (line.depth - 1) * 16 }}
+    >
+      {line.text}
+    </div>
+  );
+}
+
+// One-line digest of a system round's first meaningful line, so a collapsed
+// Shopify template reads as a short summary instead of a wall of boilerplate.
+function systemDigest(round: { body: { text: string; depth: number }[] }): string {
+  for (const l of round.body) {
+    const t = l.text.trim().replace(/^[>\s]+/, "");
+    if (t) return t.length > 64 ? `${t.slice(0, 64)}…` : t;
+  }
+  return "（模板内容）";
+}
+
+// Quoted history inside a single email: a collapsible block (collapsed by
+// default) that attributes each quoted round to a side. Round headers
+// ("On …, <sender> wrote:" / "…写道：") split the pile into rounds; the sender
+// address decides 客户 (the customer), 我方 (our support address) or 系统 (any
+// other third party, e.g. Shopify automations). Quotes without such headers
+// fall back to a plain wall.
+function QuoteBlock({
+  lines,
+  customerEmail,
+  supportFrom,
+}: {
+  lines: QuoteLine[];
+  customerEmail?: string;
+  supportFrom?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  // Third-party (系统) rounds — Shopify order confirmations and the like — stay
+  // collapsed by default so their boilerplate doesn't bury the real question-
+  // and-answer; each shows a one-line digest until clicked open.
+  const [openSystems, setOpenSystems] = useState<Set<number>>(new Set());
+  if (!lines.length) return null;
+
+  const customer = (customerEmail ?? "").toLowerCase();
+  const support = (supportFrom ?? "").toLowerCase();
+  const rounds: {
+    side: Side;
+    sender: string;
+    name: string;
+    time: string;
+    body: { text: string; depth: number }[];
+  }[] = [];
+  let current: (typeof rounds)[number] | null = null;
+  const prelude: string[] = [];
+  for (const l of lines) {
+    const head = parseRoundHead(l.text);
+    if (head) {
+      current = {
+        side: sideOf(head.email, customer, support),
+        sender: head.email,
+        name: head.name,
+        time: head.time,
+        body: [],
+      };
+      rounds.push(current);
+    } else if (current) {
+      current.body.push({ text: l.text, depth: l.depth });
+    } else {
+      prelude.push(l.text);
+    }
+  }
+
+  const foldButton = (
+    <button
+      type="button"
+      onClick={() => setOpen((v) => !v)}
+      aria-expanded={open}
+      className="flex items-center gap-1 text-[12px] text-sub hover:text-ink"
+    >
+      <span className="font-medium text-accent">{open ? "▾" : "▸"}</span>
+      <span>{open ? "收起引文" : `显示引文（${lines.length} 行）`}</span>
+    </button>
+  );
+
+  // No round header found (older clients quote with a bare ">" wall) — keep
+  // the plain look instead of an empty attribution.
+  if (!rounds.length) {
+    return (
+      <div className="mt-2 rounded-lg border border-line bg-[#FAFBFC] px-3 py-2">
+        {foldButton}
+        {open && (
+          <div className="mt-2 space-y-0.5 border-l-2 border-ink/10 pl-3 text-[14px] leading-relaxed text-ink/90">
+            {lines.map((l, i) => (
+              <QuoteLine key={i} line={l} />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 rounded-lg border border-line bg-[#FAFBFC] px-3 py-2">
+      {foldButton}
+      {open && (
+        <div className="mt-2 space-y-3">
+          {prelude.length > 0 && (
+            <p className="break-words whitespace-pre-wrap text-[14px] leading-relaxed text-ink/90">
+              {prelude.join("\n")}
+            </p>
+          )}
+          {rounds.map((r, i) => (
+            <div key={i} className="space-y-1">
+              <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
+                <span
+                  className={`inline-block rounded px-1.5 py-0.5 text-[11px] font-medium ${SIDE_BADGE[r.side]}`}
+                >
+                  {SIDE_LABEL[r.side]}
+                </span>
+                <span className="break-all text-[13px] font-medium text-ink">
+                  {r.side === "system" ? r.sender : r.name}
+                </span>
+                {r.time && (
+                  <span className="ml-auto shrink-0 text-[11px] text-ink/45 tabular-nums">
+                    {r.time}
+                  </span>
+                )}
+              </div>
+              {r.side === "system" ? (
+                openSystems.has(i) ? (
+                  <>
+                    <div className="space-y-0.5 border-l-2 border-ink/10 pl-3 text-[14px] leading-relaxed text-ink/90">
+                      {r.body.map((line, j) => (
+                        <QuoteLine key={j} line={line} />
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenSystems((prev) => {
+                          const s = new Set(prev);
+                          s.delete(i);
+                          return s;
+                        })
+                      }
+                      className="mt-0.5 text-[12px] text-ink/60 hover:text-ink"
+                    >
+                      ▾ 收起系统模板
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setOpenSystems((prev) => {
+                        const s = new Set(prev);
+                        s.add(i);
+                        return s;
+                      })
+                    }
+                    className="flex w-full items-start gap-1.5 rounded border border-dashed border-line bg-white/70 px-2 py-1.5 text-left transition-colors hover:bg-white"
+                  >
+                    <span className="mt-px shrink-0 font-medium text-amber-600">▸</span>
+                    <span className="break-words text-[13px] leading-relaxed text-ink/85">
+                      {systemDigest(r)}
+                    </span>
+                  </button>
+                )
+              ) : (
+                <div className="space-y-0.5 border-l-2 border-ink/10 pl-3 text-[14px] leading-relaxed text-ink/90">
+                  {r.body.map((line, j) => (
+                    <QuoteLine key={j} line={line} />
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // The email's fresh body rendered as a letter (greeting, paragraphs, lists and
-// the client signature). Quoted history is intentionally excluded here — the
-// Timeline lifts it into per-sender message blocks instead.
-function EmailBodyView({ text }: { text: string }) {
+// the client signature). Quoted history is folded behind a「显示引文」toggle in
+// QuoteBlock instead of being dropped, so the fresh content stays readable and
+// the quote is one click away — for single-email conversations it may be the
+// only record of the earlier thread.
+function EmailBodyView({
+  text,
+  customerEmail,
+  supportFrom,
+}: {
+  text: string;
+  customerEmail?: string;
+  supportFrom?: string;
+}) {
   const chunks = chunkEmailText(normalizeSpacing(text));
+  const quotedLines = chunks
+    .filter((c): c is Extract<BodyChunk, { kind: "quote" }> => c.kind === "quote")
+    .flatMap((c) => c.lines);
 
   return (
     <div className="space-y-2 text-[16px] leading-[1.5] text-ink">
@@ -267,6 +608,13 @@ function EmailBodyView({ text }: { text: string }) {
               );
           }
         })}
+      {quotedLines.length > 0 && (
+        <QuoteBlock
+          lines={quotedLines}
+          customerEmail={customerEmail}
+          supportFrom={supportFrom}
+        />
+      )}
     </div>
   );
 }
@@ -331,7 +679,10 @@ function AttachmentThumb({ item }: { item: TimelineItem }) {
   const [open, setOpen] = useState(false);
   const id = item.attachment_id;
   if (id == null) return null;
+  // Grid thumbnails hit the server-side downscale (?thumb=1) so a 3-4MB phone
+  // photo downloads as a ~256px JPEG; the lightbox / download keep the original.
   const src = `/api/v1/attachments/${id}`;
+  const thumbSrc = `/api/v1/attachments/${id}?thumb=1`;
   const isImage =
     (item.content_type ?? "").startsWith("image/") ||
     /\.(jpe?g|png|gif|webp|bmp|avif|svg)$/i.test(item.filename ?? "");
@@ -361,9 +712,12 @@ function AttachmentThumb({ item }: { item: TimelineItem }) {
         title={`点击放大：${item.filename}`}
       >
         <img
-          src={src}
+          src={thumbSrc}
           alt={item.filename ?? "附件图片"}
           loading="lazy"
+          decoding="async"
+          width={64}
+          height={64}
           className="h-full w-full object-cover transition-transform group-hover:scale-105"
         />
       </button>
@@ -470,11 +824,13 @@ export function Timeline({
   showCn,
   mode,
   customerEmail,
+  supportFrom,
 }: {
   items: TimelineItem[];
   showCn: boolean;
   mode: "summary" | "full";
   customerEmail?: string;
+  supportFrom?: string;
 }) {
   // The conversation centers on the latest customer email. Summary mode shows
   // only its digest; full mode shows the whole thread rebuilt from the email's
@@ -681,9 +1037,15 @@ export function Timeline({
           // latest one triggers the on-demand translate above.
           <EmailBodyView
             text={fullCn[item.email_id!] ?? (item.content_cn || item.content || "")}
+            customerEmail={customerEmail}
+            supportFrom={supportFrom}
           />
         ) : (
-          <EmailBodyView text={item.content ?? ""} />
+          <EmailBodyView
+            text={item.content ?? ""}
+            customerEmail={customerEmail}
+            supportFrom={supportFrom}
+          />
         )}
         {isLatest && <AttachmentGrid items={attachments} />}
         {isLatest && translating && !fullCn[id] && !latest.content_cn && (
